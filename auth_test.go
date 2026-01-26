@@ -110,8 +110,8 @@ func TestCreate(t *testing.T) {
 			t.Errorf("Expected KeyLength 32, got %d", auth.Options.KeyLength)
 		}
 
-		if auth.Options.ExpirationTime != time.Hour*24 {
-			t.Errorf("Expected ExpirationTime 24h, got %v", auth.Options.ExpirationTime)
+		if auth.Options.ExpirationTime != time.Minute*15 {
+			t.Errorf("Expected ExpirationTime 15m, got %v", auth.Options.ExpirationTime)
 		}
 
 		if auth.Options.AuthHeader == nil || *auth.Options.AuthHeader != "Authorization" {
@@ -244,6 +244,370 @@ func TestPasswordHashing(t *testing.T) {
 
 		if success {
 			t.Error("Login should not succeed for non-existent user")
+		}
+	})
+}
+
+// Test for LoginAndGetJWT
+func TestLoginAndGetJWT(t *testing.T) {
+	password := []byte("testpassword123")
+	auth := Create(WithExpirationTime(time.Hour))
+
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	hashedPassword, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword() failed: %v", err)
+	}
+
+	userStore := mockUserStore{
+		"testuser": hashedPassword,
+	}
+
+	auth.Options.LookupUserPasswordFunc = userStore.lookupUser
+
+	t.Run("successful login and jwt creation", func(t *testing.T) {
+		token, err := auth.LoginAndGetJWT("testuser", password, map[string]any{
+			"role": "admin",
+		})
+		if err != nil {
+			t.Fatalf("LoginAndGetJWT() failed: %v", err)
+		}
+
+		if token == "" {
+			t.Error("Token should not be empty")
+		}
+
+		// Verify the token
+		parsedToken, err := auth.VerifyToken(token)
+		if err != nil {
+			t.Fatalf("VerifyToken() failed: %v", err)
+		}
+
+		if !parsedToken.Valid {
+			t.Error("Token should be valid")
+		}
+	})
+
+	t.Run("failed login with wrong password", func(t *testing.T) {
+		_, err := auth.LoginAndGetJWT("testuser", []byte("wrongpassword"), nil)
+		if err == nil {
+			t.Error("LoginAndGetJWT() should fail with wrong password")
+		}
+	})
+
+	t.Run("failed login with non-existent user", func(t *testing.T) {
+		_, err := auth.LoginAndGetJWT("nonexistent", password, nil)
+		if err == nil {
+			t.Error("LoginAndGetJWT() should fail with non-existent user")
+		}
+	})
+}
+
+// Mock refresh token store
+type mockRefreshTokenStore struct {
+	tokens map[uuid.UUID]*RefreshToken
+}
+
+func newMockRefreshTokenStore() *mockRefreshTokenStore {
+	return &mockRefreshTokenStore{
+		tokens: make(map[uuid.UUID]*RefreshToken),
+	}
+}
+
+func (m *mockRefreshTokenStore) store(token *RefreshToken) error {
+	m.tokens[token.ID] = token
+	return nil
+}
+
+func (m *mockRefreshTokenStore) lookup(id uuid.UUID) (*RefreshToken, error) {
+	if token, ok := m.tokens[id]; ok {
+		return token, nil
+	}
+	return nil, fmt.Errorf("refresh token not found")
+}
+
+func (m *mockRefreshTokenStore) delete(id uuid.UUID) error {
+	if _, ok := m.tokens[id]; ok {
+		delete(m.tokens, id)
+		return nil
+	}
+	return fmt.Errorf("refresh token not found")
+}
+
+// Test for LoginAndGetJWTWithRefreshToken
+func TestLoginAndGetJWTWithRefreshToken(t *testing.T) {
+	password := []byte("testpassword123")
+	refreshStore := newMockRefreshTokenStore()
+
+	auth := Create(
+		WithExpirationTime(time.Hour),
+		WithRefreshTokenExpirationTime(24*time.Hour),
+		WithRefreshTokenLength(256),
+		WithStoreRefreshTokenFunc(refreshStore.store),
+		WithLookupRefreshTokenFunc(refreshStore.lookup),
+		WithDeleteRefreshTokenFunc(refreshStore.delete),
+	)
+
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	hashedPassword, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword() failed: %v", err)
+	}
+
+	userStore := mockUserStore{
+		"testuser": hashedPassword,
+	}
+
+	auth.Options.LookupUserPasswordFunc = userStore.lookupUser
+
+	t.Run("successful login with refresh token", func(t *testing.T) {
+		jwtToken, refreshToken, err := auth.LoginAndGetJWTWithRefreshToken(
+			"testuser",
+			password,
+			map[string]any{"role": "admin"},
+		)
+		if err != nil {
+			t.Fatalf("LoginAndGetJWTWithRefreshToken() failed: %v", err)
+		}
+
+		if jwtToken == "" {
+			t.Error("JWT token should not be empty")
+		}
+
+		if refreshToken == "" {
+			t.Error("Refresh token should not be empty")
+		}
+
+		// Verify the JWT token
+		parsedToken, err := auth.VerifyToken(jwtToken)
+		if err != nil {
+			t.Fatalf("VerifyToken() failed: %v", err)
+		}
+
+		if !parsedToken.Valid {
+			t.Error("JWT token should be valid")
+		}
+
+		// Verify the refresh token
+		parsedRefreshToken, err := auth.VerifyToken(refreshToken)
+		if err != nil {
+			t.Fatalf("VerifyToken() failed for refresh token: %v", err)
+		}
+
+		if !parsedRefreshToken.Valid {
+			t.Error("Refresh token should be valid")
+		}
+
+		// Check that refresh token was stored
+		if len(refreshStore.tokens) != 1 {
+			t.Errorf("Expected 1 refresh token in store, got %d", len(refreshStore.tokens))
+		}
+	})
+
+	t.Run("failed login with wrong password", func(t *testing.T) {
+		_, _, err := auth.LoginAndGetJWTWithRefreshToken("testuser", []byte("wrongpassword"), nil)
+		if err == nil {
+			t.Error("LoginAndGetJWTWithRefreshToken() should fail with wrong password")
+		}
+	})
+}
+
+// Test for LoginWithRefreshToken
+func TestLoginWithRefreshToken(t *testing.T) {
+	refreshStore := newMockRefreshTokenStore()
+
+	auth := Create(
+		WithExpirationTime(time.Hour),
+		WithRefreshTokenExpirationTime(24*time.Hour),
+		WithRefreshTokenLength(256),
+		WithStoreRefreshTokenFunc(refreshStore.store),
+		WithLookupRefreshTokenFunc(refreshStore.lookup),
+	)
+
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	t.Run("successful login with valid refresh token", func(t *testing.T) {
+		// Create a refresh token
+		refreshToken, err := auth.CreateRefreshToken("testuser")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		// Login with the refresh token
+		sub, valid, err := auth.LoginWithRefreshToken(refreshToken)
+		if err != nil {
+			t.Fatalf("LoginWithRefreshToken() failed: %v", err)
+		}
+
+		if !valid {
+			t.Error("Login should be valid")
+		}
+
+		if sub != "testuser" {
+			t.Errorf("Expected sub 'testuser', got '%s'", sub)
+		}
+	})
+
+	t.Run("login with invalid refresh token", func(t *testing.T) {
+		_, valid, err := auth.LoginWithRefreshToken("invalid.token.string")
+		if err == nil {
+			t.Error("LoginWithRefreshToken() should fail with invalid token")
+		}
+
+		if valid {
+			t.Error("Login should not be valid")
+		}
+	})
+
+	t.Run("login without refresh token function configured", func(t *testing.T) {
+		authNoRefresh := Create()
+		err := authNoRefresh.Initialize()
+		if err != nil {
+			t.Fatalf("Initialize() failed: %v", err)
+		}
+
+		_, _, err = authNoRefresh.LoginWithRefreshToken("any.token.string")
+		if err == nil {
+			t.Error("LoginWithRefreshToken() should fail when LookupRefreshTokenFunc is not set")
+		}
+	})
+}
+
+// Test for LoginWithRefreshTokenAndGetJWT
+func TestLoginWithRefreshTokenAndGetJWT(t *testing.T) {
+	refreshStore := newMockRefreshTokenStore()
+
+	auth := Create(
+		WithExpirationTime(time.Hour),
+		WithRefreshTokenExpirationTime(24*time.Hour),
+		WithRefreshTokenLength(256),
+		WithStoreRefreshTokenFunc(refreshStore.store),
+		WithLookupRefreshTokenFunc(refreshStore.lookup),
+	)
+
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	t.Run("successful jwt creation from refresh token", func(t *testing.T) {
+		// Create a refresh token
+		refreshToken, err := auth.CreateRefreshToken("testuser")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		// Get new JWT using refresh token
+		newJWT, err := auth.LoginWithRefreshTokenAndGetJWT(
+			refreshToken,
+			map[string]any{"role": "user"},
+		)
+		if err != nil {
+			t.Fatalf("LoginWithRefreshTokenAndGetJWT() failed: %v", err)
+		}
+
+		if newJWT == "" {
+			t.Error("New JWT should not be empty")
+		}
+
+		// Verify the new JWT
+		parsedToken, err := auth.VerifyToken(newJWT)
+		if err != nil {
+			t.Fatalf("VerifyToken() failed: %v", err)
+		}
+
+		if !parsedToken.Valid {
+			t.Error("New JWT should be valid")
+		}
+	})
+
+	t.Run("failed jwt creation with invalid refresh token", func(t *testing.T) {
+		_, err := auth.LoginWithRefreshTokenAndGetJWT("invalid.token.string", nil)
+		if err == nil {
+			t.Error("LoginWithRefreshTokenAndGetJWT() should fail with invalid token")
+		}
+	})
+}
+
+// Test for Logout
+func TestLogout(t *testing.T) {
+	refreshStore := newMockRefreshTokenStore()
+
+	auth := Create(
+		WithExpirationTime(time.Hour),
+		WithRefreshTokenExpirationTime(24*time.Hour),
+		WithRefreshTokenLength(256),
+		WithStoreRefreshTokenFunc(refreshStore.store),
+		WithLookupRefreshTokenFunc(refreshStore.lookup),
+		WithDeleteRefreshTokenFunc(refreshStore.delete),
+	)
+
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	t.Run("successful logout", func(t *testing.T) {
+		// Create a refresh token
+		refreshToken, err := auth.CreateRefreshToken("testuser")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		// Verify token was stored
+		if len(refreshStore.tokens) != 1 {
+			t.Errorf("Expected 1 refresh token in store, got %d", len(refreshStore.tokens))
+		}
+
+		// Logout (delete refresh token)
+		err = auth.Logout(refreshToken)
+		if err != nil {
+			t.Fatalf("Logout() failed: %v", err)
+		}
+
+		// Verify token was deleted
+		if len(refreshStore.tokens) != 0 {
+			t.Errorf("Expected 0 refresh tokens in store after logout, got %d", len(refreshStore.tokens))
+		}
+	})
+
+	t.Run("logout with invalid token", func(t *testing.T) {
+		err := auth.Logout("invalid.token.string")
+		if err == nil {
+			t.Error("Logout() should fail with invalid token")
+		}
+	})
+
+	t.Run("logout without delete function configured", func(t *testing.T) {
+		authNoDelete := Create(
+			WithStoreRefreshTokenFunc(refreshStore.store),
+			WithLookupRefreshTokenFunc(refreshStore.lookup),
+		)
+		err := authNoDelete.Initialize()
+		if err != nil {
+			t.Fatalf("Initialize() failed: %v", err)
+		}
+
+		// Create a token
+		refreshToken, err := authNoDelete.CreateRefreshToken("testuser")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		err = authNoDelete.Logout(refreshToken)
+		if err == nil {
+			t.Error("Logout() should fail when DeleteRefreshTokenFunc is not set")
 		}
 	})
 }

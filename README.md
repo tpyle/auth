@@ -79,7 +79,7 @@ authorizer := auth.Create(
 )
 
 // Create a token for a user
-token, err := authorizer.CreateToken("username", map[string]interface{}{
+token, err := authorizer.CreateJWT("username", map[string]any{
     "role": "admin",
     "permissions": []string{"read", "write"},
 })
@@ -93,7 +93,83 @@ if err != nil {
     log.Fatal(err)
 }
 
-fmt.Printf("Token valid, user: %s\n", parsedToken.Username)
+// Extract claims from the token
+claims, _ := parsedToken.Claims.(jwt.MapClaims)
+sub, _ := claims["sub"].(string)
+fmt.Printf("Token valid, user: %s\n", sub)
+```
+
+### Refresh Token Support
+
+The library provides built-in refresh token functionality for long-lived sessions:
+
+```go
+import (
+    "time"
+    "github.com/tpyle/auth"
+    "github.com/google/uuid"
+)
+
+// Mock refresh token storage
+type refreshTokenStore struct {
+    tokens map[uuid.UUID]*auth.RefreshToken
+}
+
+func (r *refreshTokenStore) store(token *auth.RefreshToken) error {
+    r.tokens[token.ID] = token
+    return nil
+}
+
+func (r *refreshTokenStore) lookup(id uuid.UUID) (*auth.RefreshToken, error) {
+    if token, ok := r.tokens[id]; ok {
+        return token, nil
+    }
+    return nil, fmt.Errorf("token not found")
+}
+
+func (r *refreshTokenStore) delete(id uuid.UUID) error {
+    delete(r.tokens, id)
+    return nil
+}
+
+// Initialize authorizer with refresh token support
+refreshStore := &refreshTokenStore{
+    tokens: make(map[uuid.UUID]*auth.RefreshToken),
+}
+
+authorizer := auth.Create(
+    auth.WithLookupUserPasswordFunc(lookupUserFunc),
+    auth.WithRefreshTokenExpirationTime(7 * 24 * time.Hour), // 7 days
+    auth.WithRefreshTokenLength(256),                        // 256 bytes of randomness
+    auth.WithStoreRefreshTokenFunc(refreshStore.store),
+    auth.WithLookupRefreshTokenFunc(refreshStore.lookup),
+    auth.WithDeleteRefreshTokenFunc(refreshStore.delete),
+)
+
+// Login and get both JWT and refresh token
+jwtToken, refreshToken, err := authorizer.LoginAndGetJWTWithRefreshToken(
+    "username",
+    []byte("password"),
+    map[string]any{"role": "admin"},
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Later, use refresh token to get a new JWT
+newJWT, err := authorizer.LoginWithRefreshTokenAndGetJWT(
+    refreshToken,
+    map[string]any{"role": "admin"},
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Logout by deleting the refresh token
+err = authorizer.Logout(refreshToken)
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ### HTTP Middleware Integration
@@ -181,9 +257,11 @@ auth.WithKeyLength(32)                     // Output key length
 ### JWT Configuration
 
 ```go
-auth.WithExpirationTime(24 * time.Hour)            // Token validity period
-auth.WithSigningKeyValidity(7 * 24 * time.Hour)    // How long keys are valid
-auth.WithSigningKeyCreationFreq(24 * time.Hour)    // Key rotation frequency
+auth.WithExpirationTime(15 * time.Minute)                 // Token validity period (default: 15 minutes)
+auth.WithSigningKeyValidity(7 * 24 * time.Hour)           // How long keys are valid
+auth.WithSigningKeyCreationFreq(24 * time.Hour)           // Key rotation frequency
+auth.WithRefreshTokenExpirationTime(7 * 24 * time.Hour)   // Refresh token validity (default: 7 days)
+auth.WithRefreshTokenLength(256)                          // Random bytes in refresh token (default: 256)
 ```
 
 ### Authentication Methods
@@ -216,6 +294,22 @@ auth.WithGetSigningKeysFunc(func() ([]*auth.KeyPairWithCreationTime, error) {
 auth.WithDeleteExpiredSigningKeysFunc(func(keyIDs []uuid.UUID) error {
     // Delete expired keys
     return keyDB.DeleteMany(keyIDs)
+})
+
+// Refresh token storage functions (optional, for refresh token support)
+auth.WithStoreRefreshTokenFunc(func(token *auth.RefreshToken) error {
+    // Store refresh token (ID and random bytes)
+    return refreshTokenDB.Store(token)
+})
+
+auth.WithLookupRefreshTokenFunc(func(id uuid.UUID) (*auth.RefreshToken, error) {
+    // Lookup refresh token by UUID
+    return refreshTokenDB.Get(id)
+})
+
+auth.WithDeleteRefreshTokenFunc(func(id uuid.UUID) error {
+    // Delete refresh token (used for logout)
+    return refreshTokenDB.Delete(id)
 })
 ```
 
@@ -374,6 +468,11 @@ type KeyPairWithCreationTime struct {
     PublicKey    *ecdsa.PublicKey
     CreationTime time.Time
 }
+
+type RefreshToken struct {
+    ID   uuid.UUID
+    Rand []byte
+}
 ```
 
 ### Main Methods
@@ -384,8 +483,16 @@ func (a *Authorizer) HashPassword(password []byte) (string, error)
 func (a *Authorizer) Login(username string, password []byte) (bool, error)
 
 // JWT operations
-func (a *Authorizer) CreateJWT(username string, claims map[string]interface{}) (string, error)
+func (a *Authorizer) CreateJWT(sub string, claims map[string]any) (string, error)
 func (a *Authorizer) VerifyToken(tokenString string) (*AuthorizerToken, error)
+func (a *Authorizer) LoginAndGetJWT(username string, password []byte, claims map[string]any) (string, error)
+
+// Refresh token operations
+func (a *Authorizer) CreateRefreshToken(sub string) (string, error)
+func (a *Authorizer) LoginWithRefreshToken(tokenString string) (string, bool, error)
+func (a *Authorizer) LoginWithRefreshTokenAndGetJWT(tokenString string, claims map[string]any) (string, error)
+func (a *Authorizer) LoginAndGetJWTWithRefreshToken(username string, password []byte, claims map[string]any) (string, string, error)
+func (a *Authorizer) Logout(refreshTokenString string) error
 
 // HTTP integration
 func (a *Authorizer) GetTokenFromRequest(r *http.Request) *AuthorizerToken
@@ -452,16 +559,18 @@ The following configuration keys are supported (shown with default values):
 
 ```yaml
 auth:
-  salt_length: 16                    # Salt length for password hashing
-  hash_time: 4                       # Argon2 time parameter
-  hash_memory_kib: 131072            # Argon2 memory parameter in KiB
-  hash_threads: 4                    # Argon2 parallelism parameter
-  key_length: 32                     # Key length for password hashing
-  signing_key_validity: 0s           # How long signing keys are valid (0 = never expire)
-  signing_key_creation_freq: 0s      # How often to create new signing keys (0 = never)
-  expiration_time: 24h               # JWT token expiration time
-  auth_header: "Authorization"       # HTTP header name for tokens (omit for none)
-  auth_cookie: ""                    # Cookie name for tokens (omit for none)
+  salt_length: 16                         # Salt length for password hashing
+  hash_time: 4                            # Argon2 time parameter
+  hash_memory_kib: 131072                 # Argon2 memory parameter in KiB
+  hash_threads: 4                         # Argon2 parallelism parameter
+  key_length: 32                          # Key length for password hashing
+  signing_key_validity: 0s                # How long signing keys are valid (0 = never expire)
+  signing_key_creation_freq: 0s           # How often to create new signing keys (0 = never)
+  expiration_time: 15m                    # JWT token expiration time
+  refresh_token_expiration_time: 168h     # Refresh token expiration time (7 days)
+  refresh_token_length: 256               # Random bytes in refresh token
+  auth_header: "Authorization"            # HTTP header name for tokens (omit for none)
+  auth_cookie: ""                         # Cookie name for tokens (omit for none)
 ```
 
 With prefix "myapp.":

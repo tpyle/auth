@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
 )
@@ -73,6 +74,158 @@ func (a *Authorizer) Login(username string, password []byte) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (a *Authorizer) LoginWithRefreshToken(tokenString string) (string, bool, error) {
+	if a.Options.LookupRefreshTokenFunc == nil {
+		return "", false, fmt.Errorf("lookup refresh token function is not set, cannot use refresh tokens")
+	}
+
+	tok, err := a.VerifyToken(tokenString)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to verify refresh token: %w", err)
+	}
+
+	if !tok.Valid {
+		return "", false, nil
+	}
+
+	// Type assertion to get the claims
+	claims, ok := tok.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", false, fmt.Errorf("invalid token claims")
+	}
+
+	tokenId, err := getClaimAsString(claims, "id")
+	if err != nil {
+		return "", false, err
+	}
+
+	tuuid, err := uuid.Parse(tokenId)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid UUID in token claims: %w", err)
+	}
+
+	refreshToken, err := a.Options.LookupRefreshTokenFunc(tuuid)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get refresh token: %w", err)
+	}
+
+	rand, err := getClaimAsString(claims, "rand")
+	if err != nil {
+		return "", false, err
+	}
+
+	randBytes, err := base64.RawStdEncoding.DecodeString(rand)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid base64 encoding in rand claim: %w", err)
+	}
+
+	if subtle.ConstantTimeCompare(refreshToken.Rand, randBytes) != 1 {
+		return "", false, fmt.Errorf("refresh token mismatch")
+	}
+
+	sub, err := getClaimAsString(claims, "sub")
+	if err != nil {
+		return "", false, err
+	}
+
+	return sub, true, nil
+}
+
+func (a *Authorizer) LoginAndGetJWT(username string, password []byte, claims map[string]any) (string, error) {
+	ok, err := a.Login(username, password)
+	if err != nil {
+		return "", fmt.Errorf("login failed: %w", err)
+	}
+	if !ok {
+		return "", fmt.Errorf("invalid username or password")
+	}
+
+	jwtToken, err := a.CreateJWT(username, claims)
+	if err != nil {
+		return "", fmt.Errorf("failed to create JWT: %w", err)
+	}
+
+	return jwtToken, nil
+}
+
+func (a *Authorizer) LoginWithRefreshTokenAndGetJWT(tokenString string, claims map[string]any) (string, error) {
+	sub, ok, err := a.LoginWithRefreshToken(tokenString)
+	if err != nil {
+		return "", fmt.Errorf("login with refresh token failed: %w", err)
+	}
+	if !ok {
+		return "", fmt.Errorf("invalid refresh token")
+	}
+
+	_, err = a.VerifyToken(tokenString)
+	if err != nil {
+		return "", fmt.Errorf("failed to verify refresh token: %w", err)
+	}
+
+	jwtToken, err := a.CreateJWT(sub, claims)
+	if err != nil {
+		return "", fmt.Errorf("failed to create JWT: %w", err)
+	}
+
+	return jwtToken, nil
+}
+
+func (a *Authorizer) LoginAndGetJWTWithRefreshToken(username string, password []byte, claims map[string]any) (string, string, error) {
+	ok, err := a.Login(username, password)
+	if err != nil {
+		return "", "", fmt.Errorf("login failed: %w", err)
+	}
+	if !ok {
+		return "", "", fmt.Errorf("invalid username or password")
+	}
+
+	jwtToken, err := a.CreateJWT(username, claims)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create JWT: %w", err)
+	}
+
+	refreshToken, err := a.CreateRefreshToken(username)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create refresh token: %w", err)
+	}
+
+	return jwtToken, refreshToken, nil
+}
+
+func (a *Authorizer) Logout(refreshTokenString string) error {
+	if a.Options.DeleteRefreshTokenFunc == nil {
+		return fmt.Errorf("delete refresh token function is not set, cannot delete refresh tokens")
+	}
+
+	tok, err := a.VerifyToken(refreshTokenString)
+	if err != nil {
+		return fmt.Errorf("failed to verify refresh token: %w", err)
+	}
+
+	// Type assertion to get the claims
+	claims, ok := tok.Claims.(jwt.MapClaims)
+	if !ok {
+		return fmt.Errorf("invalid token claims")
+	}
+
+	tokenId, err := getClaimAsString(claims, "id")
+	if err != nil {
+		return err
+	}
+
+	tuuid, err := uuid.Parse(tokenId)
+	if err != nil {
+		return fmt.Errorf("invalid UUID in token claims: %w", err)
+	}
+
+	err = a.Options.DeleteRefreshTokenFunc(tuuid)
+	if err != nil {
+		return fmt.Errorf("failed to delete refresh token: %w", err)
+	}
+
+	return nil
 }
 
 func (a *Authorizer) HashPassword(password []byte) (string, error) {

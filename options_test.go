@@ -78,6 +78,23 @@ func TestOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("WithRefreshTokenExpirationTime", func(t *testing.T) {
+		duration := time.Hour * 48
+		auth := Create(WithRefreshTokenExpirationTime(duration))
+
+		if auth.Options.RefreshTokenExpirationTime != duration {
+			t.Errorf("Expected RefreshTokenExpirationTime %v, got %v", duration, auth.Options.RefreshTokenExpirationTime)
+		}
+	})
+
+	t.Run("WithRefreshTokenLength", func(t *testing.T) {
+		auth := Create(WithRefreshTokenLength(512))
+
+		if auth.Options.RefreshTokenLength != 512 {
+			t.Errorf("Expected RefreshTokenLength 512, got %d", auth.Options.RefreshTokenLength)
+		}
+	})
+
 	t.Run("WithAuthHeader", func(t *testing.T) {
 		headerName := "X-Custom-Auth"
 		auth := Create(WithAuthHeader(&headerName))
@@ -266,6 +283,90 @@ func TestOptions(t *testing.T) {
 		}
 	})
 
+	t.Run("WithLookupRefreshTokenFunc", func(t *testing.T) {
+		testID := uuid.New()
+		testToken := &RefreshToken{
+			ID:   testID,
+			Rand: []byte("test_random_bytes"),
+		}
+
+		mockFunc := func(id uuid.UUID) (*RefreshToken, error) {
+			if id == testID {
+				return testToken, nil
+			}
+			return nil, fmt.Errorf("token not found")
+		}
+
+		auth := Create(WithLookupRefreshTokenFunc(mockFunc))
+
+		if auth.Options.LookupRefreshTokenFunc == nil {
+			t.Fatal("LookupRefreshTokenFunc should not be nil")
+		}
+
+		// Test the function works
+		token, err := auth.Options.LookupRefreshTokenFunc(testID)
+		if err != nil {
+			t.Errorf("LookupRefreshTokenFunc failed: %v", err)
+		}
+
+		if token.ID != testID {
+			t.Error("LookupRefreshTokenFunc returned unexpected token")
+		}
+	})
+
+	t.Run("WithStoreRefreshTokenFunc", func(t *testing.T) {
+		var storedToken *RefreshToken
+		mockFunc := func(token *RefreshToken) error {
+			storedToken = token
+			return nil
+		}
+
+		auth := Create(WithStoreRefreshTokenFunc(mockFunc))
+
+		if auth.Options.StoreRefreshTokenFunc == nil {
+			t.Fatal("StoreRefreshTokenFunc should not be nil")
+		}
+
+		// Test the function works
+		testToken := &RefreshToken{
+			ID:   uuid.New(),
+			Rand: []byte("test_random_bytes"),
+		}
+		err := auth.Options.StoreRefreshTokenFunc(testToken)
+		if err != nil {
+			t.Errorf("StoreRefreshTokenFunc failed: %v", err)
+		}
+
+		if storedToken.ID != testToken.ID {
+			t.Error("StoreRefreshTokenFunc didn't store correct token")
+		}
+	})
+
+	t.Run("WithDeleteRefreshTokenFunc", func(t *testing.T) {
+		var deletedID uuid.UUID
+		mockFunc := func(id uuid.UUID) error {
+			deletedID = id
+			return nil
+		}
+
+		auth := Create(WithDeleteRefreshTokenFunc(mockFunc))
+
+		if auth.Options.DeleteRefreshTokenFunc == nil {
+			t.Fatal("DeleteRefreshTokenFunc should not be nil")
+		}
+
+		// Test the function works
+		testID := uuid.New()
+		err := auth.Options.DeleteRefreshTokenFunc(testID)
+		if err != nil {
+			t.Errorf("DeleteRefreshTokenFunc failed: %v", err)
+		}
+
+		if deletedID != testID {
+			t.Error("DeleteRefreshTokenFunc didn't receive correct ID")
+		}
+	})
+
 	t.Run("WithViper", func(t *testing.T) {
 		v := viper.New()
 		auth := Create(WithViper(v))
@@ -303,8 +404,8 @@ func TestOptions(t *testing.T) {
 			t.Errorf("Expected default signing_key_creation_freq 0, got %v", v.GetDuration("auth.signing_key_creation_freq"))
 		}
 
-		if v.GetDuration("auth.expiration_time") != time.Hour*24 {
-			t.Errorf("Expected default expiration_time 24h, got %v", v.GetDuration("auth.expiration_time"))
+		if v.GetDuration("auth.expiration_time") != time.Minute*15 {
+			t.Errorf("Expected default expiration_time 15m, got %v", v.GetDuration("auth.expiration_time"))
 		}
 
 		// Test that options are read from viper
@@ -336,8 +437,8 @@ func TestOptions(t *testing.T) {
 			t.Errorf("Expected SigningKeyCreationFreq 0, got %v", auth.Options.SigningKeyCreationFreq)
 		}
 
-		if auth.Options.ExpirationTime != time.Hour*24 {
-			t.Errorf("Expected ExpirationTime 24h, got %v", auth.Options.ExpirationTime)
+		if auth.Options.ExpirationTime != time.Minute*15 {
+			t.Errorf("Expected ExpirationTime 15m, got %v", auth.Options.ExpirationTime)
 		}
 	})
 
@@ -379,8 +480,8 @@ func TestOptions(t *testing.T) {
 			t.Errorf("Expected default signing_key_creation_freq 0 with prefix, got %v", v.GetDuration(prefix+"auth.signing_key_creation_freq"))
 		}
 
-		if v.GetDuration(prefix+"auth.expiration_time") != time.Hour*24 {
-			t.Errorf("Expected default expiration_time 24h with prefix, got %v", v.GetDuration(prefix+"auth.expiration_time"))
+		if v.GetDuration(prefix+"auth.expiration_time") != time.Minute*15 {
+			t.Errorf("Expected default expiration_time 15m with prefix, got %v", v.GetDuration(prefix+"auth.expiration_time"))
 		}
 	})
 
@@ -545,8 +646,16 @@ func TestGetDefaultOptions(t *testing.T) {
 		t.Errorf("Expected default SigningKeyCreationFreq 0, got %v", opts.SigningKeyCreationFreq)
 	}
 
-	if opts.ExpirationTime != time.Hour*24 {
-		t.Errorf("Expected default ExpirationTime 24h, got %v", opts.ExpirationTime)
+	if opts.ExpirationTime != time.Minute*15 {
+		t.Errorf("Expected default ExpirationTime 15m, got %v", opts.ExpirationTime)
+	}
+
+	if opts.RefreshTokenExpirationTime != time.Hour*24*7 {
+		t.Errorf("Expected default RefreshTokenExpirationTime 168h (7 days), got %v", opts.RefreshTokenExpirationTime)
+	}
+
+	if opts.RefreshTokenLength != 256 {
+		t.Errorf("Expected default RefreshTokenLength 256, got %d", opts.RefreshTokenLength)
 	}
 
 	if opts.AuthHeader == nil || *opts.AuthHeader != "Authorization" {

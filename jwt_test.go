@@ -180,6 +180,190 @@ func TestCreateJWT(t *testing.T) {
 	})
 }
 
+// Test for CreateRefreshToken
+func TestCreateRefreshToken(t *testing.T) {
+	refreshStore := newMockRefreshTokenStore()
+
+	auth := Create(
+		WithExpirationTime(time.Hour),
+		WithRefreshTokenExpirationTime(24*time.Hour),
+		WithRefreshTokenLength(256),
+		WithStoreRefreshTokenFunc(refreshStore.store),
+	)
+
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	t.Run("create basic refresh token", func(t *testing.T) {
+		tokenString, err := auth.CreateRefreshToken("user123")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		if tokenString == "" {
+			t.Error("Token string should not be empty")
+		}
+
+		// Parse the token to verify its contents
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			return &auth.currentSigningKey.PrivateKey.PublicKey, nil
+		})
+
+		if err != nil {
+			t.Fatalf("Failed to parse generated refresh token: %v", err)
+		}
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			t.Fatal("Failed to get claims from token")
+		}
+
+		if claims["sub"] != "user123" {
+			t.Errorf("Expected sub 'user123', got %v", claims["sub"])
+		}
+
+		// Check for id claim
+		if _, ok := claims["id"]; !ok {
+			t.Error("Expected id claim to be present")
+		}
+
+		// Check for rand claim
+		if _, ok := claims["rand"]; !ok {
+			t.Error("Expected rand claim to be present")
+		}
+
+		// Check expiration
+		if exp, ok := claims["exp"].(float64); ok {
+			expTime := time.Unix(int64(exp), 0)
+			expectedExp := time.Now().Add(24 * time.Hour)
+			if expTime.Before(expectedExp.Add(-time.Minute)) || expTime.After(expectedExp.Add(time.Minute)) {
+				t.Errorf("Expiration time seems wrong: %v", expTime)
+			}
+		} else {
+			t.Error("exp claim should be present and numeric")
+		}
+
+		// Verify token was stored
+		if len(refreshStore.tokens) != 1 {
+			t.Errorf("Expected 1 refresh token in store, got %d", len(refreshStore.tokens))
+		}
+	})
+
+	t.Run("refresh token randomness", func(t *testing.T) {
+		// Clear the store
+		refreshStore.tokens = make(map[uuid.UUID]*RefreshToken)
+
+		token1, err := auth.CreateRefreshToken("user1")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		token2, err := auth.CreateRefreshToken("user2")
+		if err != nil {
+			t.Fatalf("CreateRefreshToken() failed: %v", err)
+		}
+
+		// Tokens should be different
+		if token1 == token2 {
+			t.Error("Refresh tokens should be unique")
+		}
+
+		// Verify both were stored with different IDs
+		if len(refreshStore.tokens) != 2 {
+			t.Errorf("Expected 2 refresh tokens in store, got %d", len(refreshStore.tokens))
+		}
+
+		// Check that random bytes are different
+		var tokens []*RefreshToken
+		for _, tok := range refreshStore.tokens {
+			tokens = append(tokens, tok)
+		}
+
+		if len(tokens[0].Rand) != 256 {
+			t.Errorf("Expected random bytes length 256, got %d", len(tokens[0].Rand))
+		}
+
+		// Check that random bytes are actually different (statistically very unlikely to be same)
+		if string(tokens[0].Rand) == string(tokens[1].Rand) {
+			t.Error("Random bytes should be different between tokens")
+		}
+	})
+
+	t.Run("create refresh token without store function", func(t *testing.T) {
+		authNoStore := Create(WithExpirationTime(time.Hour))
+		err := authNoStore.Initialize()
+		if err != nil {
+			t.Fatalf("Initialize() failed: %v", err)
+		}
+
+		_, err = authNoStore.CreateRefreshToken("user123")
+		if err == nil {
+			t.Error("CreateRefreshToken() should fail when StoreRefreshTokenFunc is not set")
+		}
+	})
+}
+
+// Test for getClaimAsString
+func TestGetClaimAsString(t *testing.T) {
+	t.Run("valid string claim", func(t *testing.T) {
+		claims := jwt.MapClaims{
+			"username": "testuser",
+		}
+
+		val, err := getClaimAsString(claims, "username")
+		if err != nil {
+			t.Fatalf("getClaimAsString() failed: %v", err)
+		}
+
+		if val != "testuser" {
+			t.Errorf("Expected 'testuser', got '%s'", val)
+		}
+	})
+
+	t.Run("missing claim", func(t *testing.T) {
+		claims := jwt.MapClaims{}
+
+		_, err := getClaimAsString(claims, "username")
+		if err == nil {
+			t.Error("getClaimAsString() should fail for missing claim")
+		}
+	})
+
+	t.Run("non-string claim", func(t *testing.T) {
+		claims := jwt.MapClaims{
+			"count": 42,
+		}
+
+		_, err := getClaimAsString(claims, "count")
+		if err == nil {
+			t.Error("getClaimAsString() should fail for non-string claim")
+		}
+	})
+}
+
+// Test for RefreshToken.ToMapClaims
+func TestRefreshTokenToMapClaims(t *testing.T) {
+	randBytes := []byte("test_random_bytes_12345678901234")
+	refreshToken := &RefreshToken{
+		ID:   uuid.New(),
+		Rand: randBytes,
+	}
+
+	claims := refreshToken.ToMapClaims()
+
+	if claims["id"] != refreshToken.ID.String() {
+		t.Errorf("Expected id '%s', got '%v'", refreshToken.ID.String(), claims["id"])
+	}
+
+	// Note: ToMapClaims uses base64.RawStdEncoding
+	expectedRand := "dGVzdF9yYW5kb21fYnl0ZXNfMTIzNDU2Nzg5MDEyMzQ"
+	if claims["rand"] != expectedRand {
+		t.Errorf("Expected rand '%s', got '%v'", expectedRand, claims["rand"])
+	}
+}
+
 // Test for VerifyToken
 func TestVerifyToken(t *testing.T) {
 	auth := Create(WithExpirationTime(time.Hour))

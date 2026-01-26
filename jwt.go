@@ -4,12 +4,25 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
+
+type RefreshToken struct {
+	ID   uuid.UUID
+	Rand []byte
+}
+
+func (r *RefreshToken) ToMapClaims() jwt.MapClaims {
+	return jwt.MapClaims{
+		"id":   r.ID.String(),
+		"rand": base64.RawStdEncoding.EncodeToString(r.Rand),
+	}
+}
 
 func (a *Authorizer) generateNewKey() error {
 	newKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -111,7 +124,7 @@ func (a *Authorizer) Initialize() error {
 	return nil
 }
 
-func (a *Authorizer) CreateJWT(sub string, claims map[string]interface{}) (string, error) {
+func (a *Authorizer) CreateJWT(sub string, claims map[string]any) (string, error) {
 	jwtClaims := jwt.MapClaims{
 		"sub": sub,
 		"iat": time.Now().Unix(),
@@ -133,6 +146,54 @@ func (a *Authorizer) CreateJWT(sub string, claims map[string]interface{}) (strin
 	}
 
 	return signedToken, nil
+}
+
+func (a *Authorizer) CreateRefreshToken(sub string) (string, error) {
+	if a.Options.StoreRefreshTokenFunc == nil {
+		return "", fmt.Errorf("store refresh token function is not set, cannot create refresh tokens")
+	}
+
+	randBytes := make([]byte, a.Options.RefreshTokenLength)
+	_, err := rand.Read(randBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate random bytes for refresh token: %w", err)
+	}
+
+	tok := &RefreshToken{
+		ID:   uuid.New(),
+		Rand: randBytes,
+	}
+
+	claims := tok.ToMapClaims()
+
+	claims["sub"] = sub
+	claims["iat"] = time.Now().Unix()
+	claims["exp"] = time.Now().Add(a.Options.RefreshTokenExpirationTime).Unix()
+
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	signedToken, err := token.SignedString(a.currentSigningKey.PrivateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign refresh token: %w", err)
+	}
+
+	err = a.Options.StoreRefreshTokenFunc(tok)
+	if err != nil {
+		return "", fmt.Errorf("failed to store refresh token: %w", err)
+	}
+
+	return signedToken, nil
+}
+
+func getClaimAsString(claims jwt.MapClaims, key string) (string, error) {
+	val, ok := claims[key]
+	if !ok {
+		return "", fmt.Errorf("claim %s not found", key)
+	}
+	strVal, ok := val.(string)
+	if !ok {
+		return "", fmt.Errorf("claim %s is not a string", key)
+	}
+	return strVal, nil
 }
 
 type AuthorizerToken jwt.Token

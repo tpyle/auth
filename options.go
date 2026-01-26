@@ -16,9 +16,11 @@ type Options struct {
 	HashThreads   uint8
 	KeyLength     uint32
 
-	SigningKeyValidity     time.Duration // How long signing keys are valid for. If zero, keys never expire. Keys are still rotated if SigningKeyCreationFreq is set.
-	SigningKeyCreationFreq time.Duration // How often new signing keys are created. If zero, no new keys are created. To avoid storing signing keys, new keys will be created on startup always.
-	ExpirationTime         time.Duration // How long tokens are valid for. Must not be zero.
+	SigningKeyValidity         time.Duration // How long signing keys are valid for. If zero, keys never expire. Keys are still rotated if SigningKeyCreationFreq is set.
+	SigningKeyCreationFreq     time.Duration // How often new signing keys are created. If zero, no new keys are created. To avoid storing signing keys, new keys will be created on startup always.
+	ExpirationTime             time.Duration // How long tokens are valid for. Must not be zero.
+	RefreshTokenExpirationTime time.Duration // How long refresh tokens are valid for. Must not be zero.
+	RefreshTokenLength         int           // Length of the random part of refresh tokens in bytes.
 
 	AuthHeader *string
 	AuthCookie *string
@@ -29,6 +31,10 @@ type Options struct {
 	DeleteExpiredSigningKeyFunc  func(uuid.UUID) error
 	DeleteExpiredSigningKeysFunc func([]uuid.UUID) error
 	LookupUserPasswordFunc       func(username string) (string, error)
+
+	LookupRefreshTokenFunc func(uuid uuid.UUID) (*RefreshToken, error)
+	StoreRefreshTokenFunc  func(token *RefreshToken) error
+	DeleteRefreshTokenFunc func(uuid uuid.UUID) error
 
 	ViperRef *viper.Viper
 }
@@ -45,12 +51,13 @@ func getDefaultOptions() *Options {
 		HashThreads:   4,
 		KeyLength:     32,
 
-		SigningKeyValidity:     0,
-		SigningKeyCreationFreq: 0,
-		ExpirationTime:         time.Hour * 24,
-
-		AuthHeader: stringP("Authorization"),
-		AuthCookie: nil,
+		SigningKeyValidity:         0,
+		SigningKeyCreationFreq:     0,
+		ExpirationTime:             time.Minute * 15,
+		RefreshTokenExpirationTime: time.Hour * 24 * 7,
+		RefreshTokenLength:         256,
+		AuthHeader:                 stringP("Authorization"),
+		AuthCookie:                 nil,
 	}
 }
 
@@ -99,6 +106,18 @@ func WithSigningKeyCreationFreq(d time.Duration) Option {
 func WithExpirationTime(d time.Duration) Option {
 	return func(o *Options) {
 		o.ExpirationTime = d
+	}
+}
+
+func WithRefreshTokenExpirationTime(d time.Duration) Option {
+	return func(o *Options) {
+		o.RefreshTokenExpirationTime = d
+	}
+}
+
+func WithRefreshTokenLength(length int) Option {
+	return func(o *Options) {
+		o.RefreshTokenLength = length
 	}
 }
 
@@ -151,6 +170,24 @@ func WithDeleteExpiredSigningKeyFunc(f func(uuid.UUID) error) Option {
 func WithDeleteExpiredSigningKeysFunc(f func([]uuid.UUID) error) Option {
 	return func(o *Options) {
 		o.DeleteExpiredSigningKeysFunc = f
+	}
+}
+
+func WithLookupRefreshTokenFunc(f func(uuid uuid.UUID) (*RefreshToken, error)) Option {
+	return func(o *Options) {
+		o.LookupRefreshTokenFunc = f
+	}
+}
+
+func WithStoreRefreshTokenFunc(f func(token *RefreshToken) error) Option {
+	return func(o *Options) {
+		o.StoreRefreshTokenFunc = f
+	}
+}
+
+func WithDeleteRefreshTokenFunc(f func(uuid uuid.UUID) error) Option {
+	return func(o *Options) {
+		o.DeleteRefreshTokenFunc = f
 	}
 }
 
