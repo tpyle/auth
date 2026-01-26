@@ -436,3 +436,97 @@ func TestHasToken(t *testing.T) {
 		}
 	})
 }
+
+// Test for GetSub
+func TestGetSub(t *testing.T) {
+	auth := Create()
+	err := auth.Initialize()
+	if err != nil {
+		t.Fatalf("Initialize() failed: %v", err)
+	}
+
+	t.Run("get sub from request with token", func(t *testing.T) {
+		expectedSub := "user123"
+		tokenString, err := auth.CreateJWT(expectedSub, nil)
+		if err != nil {
+			t.Fatalf("CreateJWT() failed: %v", err)
+		}
+
+		token, err := auth.VerifyToken(tokenString)
+		if err != nil {
+			t.Fatalf("VerifyToken() failed: %v", err)
+		}
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		ctx := WithToken(req.Context(), token)
+		req = req.WithContext(ctx)
+
+		sub, err := GetSub(req)
+		if err != nil {
+			t.Fatalf("GetSub() failed: %v", err)
+		}
+
+		if sub != expectedSub {
+			t.Errorf("Expected sub '%s', got '%s'", expectedSub, sub)
+		}
+	})
+
+	t.Run("get sub with different subject", func(t *testing.T) {
+		expectedSub := "admin@example.com"
+		tokenString, err := auth.CreateJWT(expectedSub, nil)
+		if err != nil {
+			t.Fatalf("CreateJWT() failed: %v", err)
+		}
+
+		token, err := auth.VerifyToken(tokenString)
+		if err != nil {
+			t.Fatalf("VerifyToken() failed: %v", err)
+		}
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		ctx := WithToken(req.Context(), token)
+		req = req.WithContext(ctx)
+
+		sub, err := GetSub(req)
+		if err != nil {
+			t.Fatalf("GetSub() failed: %v", err)
+		}
+
+		if sub != expectedSub {
+			t.Errorf("Expected sub '%s', got '%s'", expectedSub, sub)
+		}
+	})
+
+	t.Run("request without token", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+
+		sub, err := GetSub(req)
+		if err == nil {
+			t.Error("GetSub() should return error for request without token")
+		}
+
+		if sub != "" {
+			t.Errorf("Expected empty string, got '%s'", sub)
+		}
+
+		expectedError := "no token in context"
+		if err.Error() != expectedError {
+			t.Errorf("Expected error '%s', got '%s'", expectedError, err.Error())
+		}
+	})
+
+	t.Run("request with nil token", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+		ctx := WithToken(req.Context(), nil)
+		req = req.WithContext(ctx)
+
+		sub, err := GetSub(req)
+		if err == nil {
+			t.Error("GetSub() should return error for nil token")
+		}
+
+		if sub != "" {
+			t.Errorf("Expected empty string, got '%s'", sub)
+		}
+	})
+}

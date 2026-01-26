@@ -2,8 +2,11 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func parseAuthHeader(header string) (string, string) {
@@ -98,4 +101,18 @@ func HasToken(r *http.Request) bool {
 	token := GetToken(r.Context())
 
 	return token != nil
+}
+
+func GetSub(r *http.Request) (string, error) {
+	token := GetToken(r.Context())
+	if token == nil {
+		return "", fmt.Errorf("no token in context")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", fmt.Errorf("invalid token claims")
+	}
+
+	return getClaimAsString(claims, "sub")
 }
