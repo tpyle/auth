@@ -472,6 +472,7 @@ type KeyPairWithCreationTime struct {
 type RefreshToken struct {
     ID   uuid.UUID
     Rand []byte
+    Subject string `json:"sub"`
 }
 ```
 

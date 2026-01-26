@@ -13,14 +13,16 @@ import (
 )
 
 type RefreshToken struct {
-	ID   uuid.UUID
-	Rand []byte
+	ID      uuid.UUID
+	Rand    []byte
+	Subject string `json:"sub"`
 }
 
 func (r *RefreshToken) ToMapClaims() jwt.MapClaims {
 	return jwt.MapClaims{
 		"id":   r.ID.String(),
 		"rand": base64.RawStdEncoding.EncodeToString(r.Rand),
+		"sub":  r.Subject,
 	}
 }
 
@@ -160,13 +162,13 @@ func (a *Authorizer) CreateRefreshToken(sub string) (string, error) {
 	}
 
 	tok := &RefreshToken{
-		ID:   uuid.New(),
-		Rand: randBytes,
+		ID:      uuid.New(),
+		Rand:    randBytes,
+		Subject: sub,
 	}
 
 	claims := tok.ToMapClaims()
 
-	claims["sub"] = sub
 	claims["iat"] = time.Now().Unix()
 	claims["exp"] = time.Now().Add(a.Options.RefreshTokenExpirationTime).Unix()
 
