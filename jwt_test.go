@@ -497,17 +497,13 @@ func TestKeyFunc(t *testing.T) {
 			t.Fatalf("KeyFunc() failed: %v", err)
 		}
 
-		keyList, ok := keys.([]*KeyPairWithCreationTime)
+		key, ok := keys.(*KeyPairWithCreationTime)
 		if !ok {
-			t.Fatal("Expected []*KeyPairWithCreationTime from KeyFunc")
+			t.Fatal("Expected *KeyPairWithCreationTime from KeyFunc")
 		}
 
-		if len(keyList) != 1 {
-			t.Fatalf("Expected 1 key, got %d", len(keyList))
-		}
-
-		if keyList[0].ID != keyID {
-			t.Errorf("Expected key ID %s, got %s", keyID.String(), keyList[0].ID.String())
+		if key.ID != keyID {
+			t.Fatalf("Expected key ID %s, got %s", keyID.String(), key.ID.String())
 		}
 	})
 

@@ -26,7 +26,7 @@ type Options struct {
 	AuthCookie *string
 
 	StoreNewSigningKeyFunc       func(*KeyPairWithCreationTime) error
-	GetSigningKeyFunc            func(kid uuid.UUID) ([]*KeyPairWithCreationTime, error)
+	GetSigningKeyFunc            func(kid uuid.UUID) (*KeyPairWithCreationTime, error)
 	GetSigningKeysFunc           func() ([]*KeyPairWithCreationTime, error)
 	DeleteExpiredSigningKeyFunc  func(uuid.UUID) error
 	DeleteExpiredSigningKeysFunc func([]uuid.UUID) error
@@ -149,7 +149,7 @@ func WithStoreNewSigningKeyFunc(f func(*KeyPairWithCreationTime) error) Option {
 	}
 }
 
-func WithGetSigningKeyFunc(f func(kid uuid.UUID) ([]*KeyPairWithCreationTime, error)) Option {
+func WithGetSigningKeyFunc(f func(kid uuid.UUID) (*KeyPairWithCreationTime, error)) Option {
 	return func(o *Options) {
 		o.GetSigningKeyFunc = f
 	}
