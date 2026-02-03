@@ -43,9 +43,9 @@ func (m *mockKeyStore) storeKey(key *KeyPairWithCreationTime) error {
 	return nil
 }
 
-func (m *mockKeyStore) getKey(kid *uuid.UUID) ([]KeyPairWithCreationTime, error) {
-	if key, ok := m.keys[*kid]; ok {
-		return []KeyPairWithCreationTime{*key}, nil
+func (m *mockKeyStore) getKey(kid uuid.UUID) ([]*KeyPairWithCreationTime, error) {
+	if key, ok := m.keys[kid]; ok {
+		return []*KeyPairWithCreationTime{key}, nil
 	}
 	return nil, fmt.Errorf("key not found")
 }

@@ -218,7 +218,7 @@ func (a *Authorizer) KeyFunc(token *jwt.Token) (interface{}, error) {
 			return nil, fmt.Errorf("invalid kid in token header: %w", err)
 		}
 
-		return a.Options.GetSigningKeyFunc(&kuuid)
+		return a.Options.GetSigningKeyFunc(kuuid)
 	}
 }
 

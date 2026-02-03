@@ -182,9 +182,9 @@ func TestOptions(t *testing.T) {
 
 	t.Run("WithGetSigningKeyFunc", func(t *testing.T) {
 		testID := uuid.New()
-		mockFunc := func(kid *uuid.UUID) ([]KeyPairWithCreationTime, error) {
-			if *kid == testID {
-				return []KeyPairWithCreationTime{{ID: testID}}, nil
+		mockFunc := func(kid uuid.UUID) ([]*KeyPairWithCreationTime, error) {
+			if kid == testID {
+				return []*KeyPairWithCreationTime{{ID: testID}}, nil
 			}
 			return nil, fmt.Errorf("key not found")
 		}
@@ -196,7 +196,7 @@ func TestOptions(t *testing.T) {
 		}
 
 		// Test the function works
-		keys, err := auth.Options.GetSigningKeyFunc(&testID)
+		keys, err := auth.Options.GetSigningKeyFunc(testID)
 		if err != nil {
 			t.Errorf("GetSigningKeyFunc failed: %v", err)
 		}
