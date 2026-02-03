@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -28,6 +29,28 @@ type KeyPairWithCreationTime struct {
 	ID           uuid.UUID
 	PublicKey    *ecdsa.PublicKey
 	CreationTime time.Time
+}
+
+func (kp *KeyPairWithCreationTime) GetPublicKeyAsBinary() ([]byte, error) {
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(kp.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+	}
+	return pubKeyBytes, nil
+}
+
+func GetECDSAPublicKeyFromBinary(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
+	pubKeyInterface, err := x509.ParsePKIXPublicKey(pubKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	pubKey, ok := pubKeyInterface.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("parsed key is not an ECDSA public key")
+	}
+
+	return pubKey, nil
 }
 
 func Create(opts ...Option) *Authorizer {

@@ -1,6 +1,11 @@
 package auth
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -654,6 +659,192 @@ func TestParsePhcString(t *testing.T) {
 			_, _, err := auth.parsePhcString(tc)
 			if err == nil {
 				t.Errorf("parsePhcString() should have failed for: %s", tc)
+			}
+		}
+	})
+}
+
+// TestGetPublicKeyAsBinary tests the GetPublicKeyAsBinary method
+func TestGetPublicKeyAsBinary(t *testing.T) {
+	t.Run("valid ECDSA public key", func(t *testing.T) {
+		// Generate a test key pair
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("Failed to generate ECDSA key: %v", err)
+		}
+
+		kp := &KeyPairWithCreationTime{
+			ID:           uuid.New(),
+			PublicKey:    &privateKey.PublicKey,
+			CreationTime: time.Now(),
+		}
+
+		// Convert to binary
+		pubKeyBytes, err := kp.GetPublicKeyAsBinary()
+		if err != nil {
+			t.Fatalf("GetPublicKeyAsBinary() failed: %v", err)
+		}
+
+		// Verify the result is not empty
+		if len(pubKeyBytes) == 0 {
+			t.Error("GetPublicKeyAsBinary() returned empty byte slice")
+		}
+
+		// Verify we can parse it back
+		parsedKey, err := x509.ParsePKIXPublicKey(pubKeyBytes)
+		if err != nil {
+			t.Fatalf("Failed to parse marshaled public key: %v", err)
+		}
+
+		// Verify it's an ECDSA key
+		parsedECDSAKey, ok := parsedKey.(*ecdsa.PublicKey)
+		if !ok {
+			t.Fatal("Parsed key is not an ECDSA public key")
+		}
+
+		// Verify the key matches
+		if parsedECDSAKey.X.Cmp(kp.PublicKey.X) != 0 || parsedECDSAKey.Y.Cmp(kp.PublicKey.Y) != 0 {
+			t.Error("Parsed key does not match original key")
+		}
+	})
+}
+
+// TestGetECDSAPublicKeyFromBinary tests the GetECDSAPublicKeyFromBinary function
+func TestGetECDSAPublicKeyFromBinary(t *testing.T) {
+	t.Run("valid ECDSA public key binary", func(t *testing.T) {
+		// Generate a test key pair
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("Failed to generate ECDSA key: %v", err)
+		}
+
+		// Marshal the public key
+		pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+		if err != nil {
+			t.Fatalf("Failed to marshal public key: %v", err)
+		}
+
+		// Parse it back
+		parsedKey, err := GetECDSAPublicKeyFromBinary(pubKeyBytes)
+		if err != nil {
+			t.Fatalf("GetECDSAPublicKeyFromBinary() failed: %v", err)
+		}
+
+		// Verify the key matches
+		if parsedKey.X.Cmp(privateKey.PublicKey.X) != 0 || parsedKey.Y.Cmp(privateKey.PublicKey.Y) != 0 {
+			t.Error("Parsed key does not match original key")
+		}
+
+		// Verify curve matches
+		if parsedKey.Curve != privateKey.PublicKey.Curve {
+			t.Error("Parsed key curve does not match original")
+		}
+	})
+
+	t.Run("invalid binary data", func(t *testing.T) {
+		invalidData := []byte("this is not a valid key")
+
+		_, err := GetECDSAPublicKeyFromBinary(invalidData)
+		if err == nil {
+			t.Error("GetECDSAPublicKeyFromBinary() should fail with invalid data")
+		}
+	})
+
+	t.Run("empty binary data", func(t *testing.T) {
+		_, err := GetECDSAPublicKeyFromBinary([]byte{})
+		if err == nil {
+			t.Error("GetECDSAPublicKeyFromBinary() should fail with empty data")
+		}
+	})
+
+	t.Run("non-ECDSA key", func(t *testing.T) {
+		// Generate an RSA key for testing
+		rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("Failed to generate RSA key: %v", err)
+		}
+
+		// Marshal the RSA public key
+		pubKeyBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+		if err != nil {
+			t.Fatalf("Failed to marshal RSA public key: %v", err)
+		}
+
+		// Try to parse as ECDSA
+		_, err = GetECDSAPublicKeyFromBinary(pubKeyBytes)
+		if err == nil {
+			t.Error("GetECDSAPublicKeyFromBinary() should fail with non-ECDSA key")
+		}
+		if !strings.Contains(err.Error(), "not an ECDSA public key") {
+			t.Errorf("Expected error about non-ECDSA key, got: %v", err)
+		}
+	})
+}
+
+// TestRoundTripPublicKeyConversion tests the round-trip conversion
+func TestRoundTripPublicKeyConversion(t *testing.T) {
+	t.Run("binary conversion round-trip", func(t *testing.T) {
+		// Generate a test key pair
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("Failed to generate ECDSA key: %v", err)
+		}
+
+		kp := &KeyPairWithCreationTime{
+			ID:           uuid.New(),
+			PublicKey:    &privateKey.PublicKey,
+			CreationTime: time.Now(),
+		}
+
+		// Convert to binary
+		pubKeyBytes, err := kp.GetPublicKeyAsBinary()
+		if err != nil {
+			t.Fatalf("GetPublicKeyAsBinary() failed: %v", err)
+		}
+
+		// Parse back
+		parsedKey, err := GetECDSAPublicKeyFromBinary(pubKeyBytes)
+		if err != nil {
+			t.Fatalf("GetECDSAPublicKeyFromBinary() failed: %v", err)
+		}
+
+		// Verify the keys match
+		if parsedKey.X.Cmp(kp.PublicKey.X) != 0 || parsedKey.Y.Cmp(kp.PublicKey.Y) != 0 {
+			t.Error("Round-trip conversion altered the key")
+		}
+
+		// Verify curve matches
+		if parsedKey.Curve != kp.PublicKey.Curve {
+			t.Error("Round-trip conversion altered the curve")
+		}
+	})
+
+	t.Run("multiple keys round-trip", func(t *testing.T) {
+		// Test with multiple keys to ensure consistency
+		for i := 0; i < 5; i++ {
+			privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatalf("Failed to generate ECDSA key %d: %v", i, err)
+			}
+
+			kp := &KeyPairWithCreationTime{
+				ID:           uuid.New(),
+				PublicKey:    &privateKey.PublicKey,
+				CreationTime: time.Now(),
+			}
+
+			pubKeyBytes, err := kp.GetPublicKeyAsBinary()
+			if err != nil {
+				t.Fatalf("GetPublicKeyAsBinary() failed for key %d: %v", i, err)
+			}
+
+			parsedKey, err := GetECDSAPublicKeyFromBinary(pubKeyBytes)
+			if err != nil {
+				t.Fatalf("GetECDSAPublicKeyFromBinary() failed for key %d: %v", i, err)
+			}
+
+			if parsedKey.X.Cmp(kp.PublicKey.X) != 0 || parsedKey.Y.Cmp(kp.PublicKey.Y) != 0 {
+				t.Errorf("Round-trip conversion altered key %d", i)
 			}
 		}
 	})
