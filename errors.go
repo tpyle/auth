@@ -48,10 +48,6 @@ var (
 	// [UserStore.LookupPasswordHash] when the user does not exist.
 	ErrUserNotFound = errors.New("auth: user not found")
 
-	// ErrKeyNotFound must be returned (optionally wrapped) by
-	// [KeyStore.GetKey] when the key does not exist.
-	ErrKeyNotFound = errors.New("auth: key not found")
-
 	// ErrRefreshTokenNotFound must be returned (optionally wrapped) by
 	// [RefreshTokenStore.ConsumeRefreshToken] when the token does not exist.
 	ErrRefreshTokenNotFound = errors.New("auth: refresh token not found")

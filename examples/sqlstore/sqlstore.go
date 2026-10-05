@@ -23,9 +23,10 @@
 //	    subject    TEXT NOT NULL,
 //	    issued_at  TIMESTAMPTZ NOT NULL,
 //	    expires_at TIMESTAMPTZ NOT NULL,
-//	    used       BOOLEAN NOT NULL DEFAULT FALSE
+//	    used_at    TIMESTAMPTZ          -- NULL = unused
 //	);
 //	CREATE INDEX ON refresh_tokens (family_id);
+//	CREATE INDEX ON refresh_tokens (subject);
 //	CREATE INDEX ON refresh_tokens (expires_at);
 package sqlstore
 
@@ -81,17 +82,6 @@ func (s *Store) StoreKey(ctx context.Context, k *auth.VerificationKey) error {
 	return err
 }
 
-// GetKey implements auth.KeyStore.
-func (s *Store) GetKey(ctx context.Context, id uuid.UUID) (*auth.VerificationKey, error) {
-	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, public_key, created_at, expires_at FROM signing_keys WHERE id = $1`, id)
-	k, err := scanKey(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, auth.ErrKeyNotFound
-	}
-	return k, err
-}
-
 // ListKeys implements auth.KeyStore.
 func (s *Store) ListKeys(ctx context.Context) ([]*auth.VerificationKey, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, public_key, created_at, expires_at FROM signing_keys`)
@@ -128,26 +118,47 @@ func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecor
 	return err
 }
 
-// ConsumeRefreshToken implements auth.RefreshTokenStore. The UPDATE takes a
-// row lock, and the subquery reads the value from before the update, so two
-// concurrent calls cannot both see used = false.
-func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID) (auth.RefreshTokenRecord, error) {
+// ConsumeRefreshToken implements auth.RefreshTokenStore.
+//
+// The conditional UPDATE is what makes this atomic: a concurrent caller
+// blocks on the row lock and then re-checks "used_at IS NULL" against the
+// committed row, so exactly one caller sees the token as unused. Everyone
+// else reads the record, including the first use time.
+func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (auth.RefreshTokenRecord, error) {
 	var r auth.RefreshTokenRecord
 	err := s.DB.QueryRowContext(ctx, `
-		UPDATE refresh_tokens t SET used = TRUE
-		FROM (SELECT id, used FROM refresh_tokens WHERE id = $1 FOR UPDATE) old
-		WHERE t.id = old.id
-		RETURNING t.id, t.family_id, t.subject, t.issued_at, t.expires_at, old.used`, id,
-	).Scan(&r.ID, &r.FamilyID, &r.Subject, &r.IssuedAt, &r.ExpiresAt, &r.Used)
+		UPDATE refresh_tokens SET used_at = $2
+		WHERE id = $1 AND used_at IS NULL
+		RETURNING id, family_id, subject, issued_at, expires_at`, id, now,
+	).Scan(&r.ID, &r.FamilyID, &r.Subject, &r.IssuedAt, &r.ExpiresAt)
+	if err == nil {
+		return r, nil // was unused; UsedAt stays zero in the returned record
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return r, err
+	}
+
+	var usedAt sql.NullTime
+	err = s.DB.QueryRowContext(ctx, `
+		SELECT id, family_id, subject, issued_at, expires_at, used_at
+		FROM refresh_tokens WHERE id = $1`, id,
+	).Scan(&r.ID, &r.FamilyID, &r.Subject, &r.IssuedAt, &r.ExpiresAt, &usedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, auth.ErrRefreshTokenNotFound
 	}
+	r.UsedAt = usedAt.Time
 	return r, err
 }
 
 // RevokeRefreshTokenFamily implements auth.RefreshTokenStore.
 func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error {
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = $1`, familyID)
+	return err
+}
+
+// RevokeRefreshTokensForSubject implements auth.RefreshTokenStore.
+func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE subject = $1`, subject)
 	return err
 }
 

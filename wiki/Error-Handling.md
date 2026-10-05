@@ -17,9 +17,9 @@ Any error that matches none of the sentinels below is an **internal failure**: a
 | `ErrTokenExpired` | `VerifyAccessToken`, `ClaimsFromRequest`, `Refresh` | The token is otherwise valid but past `exp` (allowing for `Leeway`). `Logout` accepts expired tokens. | 401 (clients should refresh, or log in again if the refresh token expired) |
 | `ErrNoToken` | `ClaimsFromRequest`, middleware | No token in the configured header or cookie. | 401 |
 | `ErrTokenRevoked` | `Refresh` | The refresh token is validly signed, but its record is gone (logged out, family revoked, or purged). | 401 |
-| `ErrRefreshTokenReused` | `Refresh` | A spent refresh token was presented again. The family has been revoked. If revoking failed, the error is `errors.Join(ErrRefreshTokenReused, <store error>)`. | 401, and consider logging it as a security event |
+| `ErrRefreshTokenReused` | `Refresh` | A spent refresh token was presented again after the `RefreshReuseGrace` window (measured from its first use), or at all when the grace is 0. The family has been revoked. Reuse inside the window is not an error: it gets a new pair. If revoking failed, the error is `errors.Join(ErrRefreshTokenReused, <store error>)`. | 401, and consider logging it as a security event |
 | `ErrReservedClaim` | `IssueAccessToken`, `IssueTokenPair`, `Login`, `Refresh` | An extra claim (from the argument or the `ClaimsProvider`) used a reserved name. This is a programming error. | 500 |
-| `ErrNotConfigured` | `Authenticate`/`Login` (no `UserStore`), `Refresh`/`Logout` (no `RefreshTokenStore`) | A store the operation needs was not passed to `New`. This is a programming error. | 500 |
+| `ErrNotConfigured` | `Authenticate`/`Login` (no `UserStore`), `Refresh`/`Logout`/`RevokeAllSessions` (no `RefreshTokenStore`) | A store the operation needs was not passed to `New`. This is a programming error. | 500 |
 | `ErrClosed` | `Login`, `IssueAccessToken`, `IssueTokenPair`, `Refresh` | `Close` has been called. Verification still works after close. | 503 during shutdown |
 | `ErrInvalidHash` | `VerifyPassword`, `NeedsRehash`, `Authenticate`, `Login` | A stored password hash is not a valid Argon2id PHC string. This points to corrupt data. | 500 |
 
@@ -28,8 +28,9 @@ Any error that matches none of the sentinels below is an **internal failure**: a
 ### Other errors you may see
 
 - `ctx.Err()` (`context.Canceled` / `context.DeadlineExceeded`) from `HashPassword`, `Authenticate` and `Login` when the context ends while waiting for a hashing slot.
-- Errors from `New`: invalid configuration (all problems joined), or a failure to store the first signing key.
-- Calling `IssueAccessToken`/`IssueTokenPair` with an empty subject returns a plain error, not a sentinel.
+- Errors from `New`: invalid configuration (all problems joined), or a failure to store the first signing key (or the next key, with rotation on).
+- A `KeyStore.ListKeys` failure while verifying a token whose `kid` the instance does not know yet. Keys the instance already knows keep verifying while the store is down. This is an internal error (500), not `ErrInvalidToken`.
+- Calling `IssueAccessToken`/`IssueTokenPair`/`RevokeAllSessions` with an empty subject returns a plain error, not a sentinel.
 
 ## Errors your stores must return
 
@@ -38,10 +39,9 @@ These sentinels are part of the store contracts. Return them, optionally wrapped
 | Error | Returned by your | Library behavior |
 |---|---|---|
 | `ErrUserNotFound` | `UserStore.LookupPasswordHash` | Checks a dummy hash, then returns `ErrInvalidCredentials` |
-| `ErrKeyNotFound` | `KeyStore.GetKey` | Verification fails with `ErrInvalidToken` |
 | `ErrRefreshTokenNotFound` | `RefreshTokenStore.ConsumeRefreshToken` | `Refresh` returns `ErrTokenRevoked` |
 
-If a store returns a different error for "not found", it is treated as an internal failure. See [Storage](Storage.md).
+If a store returns a different error for "not found", it is treated as an internal failure. `KeyStore` has no "not found" case: a `kid` missing from `ListKeys` makes verification fail with `ErrInvalidToken`. See [Storage](Storage.md).
 
 ## Middleware
 

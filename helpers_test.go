@@ -22,8 +22,10 @@ type fakeClock struct {
 	t  time.Time
 }
 
+// newFakeClock starts at the current time, so records it timestamps are not
+// already expired by the wall-clock purging in MemoryRefreshTokenStore.
 func newFakeClock() *fakeClock {
-	return &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	return &fakeClock{t: time.Now().Truncate(time.Second)}
 }
 
 func (c *fakeClock) Now() time.Time {
@@ -65,10 +67,9 @@ func mustHash(t *testing.T, password string) string {
 // since background rotation may read them concurrently.
 type faultyKeyStore struct {
 	KeyStore
-	mu                                   sync.Mutex
-	storeErr, getErr, listErr, deleteErr error
-	getCalls                             atomic.Int32
-	nilGet                               bool
+	mu                           sync.Mutex
+	storeErr, listErr, deleteErr error
+	listCalls                    atomic.Int32
 }
 
 func newFaultyKeyStore() *faultyKeyStore {
@@ -94,18 +95,8 @@ func (f *faultyKeyStore) StoreKey(ctx context.Context, k *VerificationKey) error
 	return f.KeyStore.StoreKey(ctx, k)
 }
 
-func (f *faultyKeyStore) GetKey(ctx context.Context, id uuid.UUID) (*VerificationKey, error) {
-	f.getCalls.Add(1)
-	if err := f.err(&f.getErr); err != nil {
-		return nil, err
-	}
-	if f.nilGet {
-		return nil, nil
-	}
-	return f.KeyStore.GetKey(ctx, id)
-}
-
 func (f *faultyKeyStore) ListKeys(ctx context.Context) ([]*VerificationKey, error) {
+	f.listCalls.Add(1)
 	if err := f.err(&f.listErr); err != nil {
 		return nil, err
 	}
@@ -132,11 +123,18 @@ func (f *faultyRefreshStore) CreateRefreshToken(ctx context.Context, rec Refresh
 	return f.RefreshTokenStore.CreateRefreshToken(ctx, rec)
 }
 
-func (f *faultyRefreshStore) ConsumeRefreshToken(ctx context.Context, id uuid.UUID) (RefreshTokenRecord, error) {
+func (f *faultyRefreshStore) ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (RefreshTokenRecord, error) {
 	if f.consumeErr != nil {
 		return RefreshTokenRecord{}, f.consumeErr
 	}
-	return f.RefreshTokenStore.ConsumeRefreshToken(ctx, id)
+	return f.RefreshTokenStore.ConsumeRefreshToken(ctx, id, now)
+}
+
+func (f *faultyRefreshStore) RevokeRefreshTokensForSubject(ctx context.Context, subject string) error {
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
+	return f.RefreshTokenStore.RevokeRefreshTokensForSubject(ctx, subject)
 }
 
 func (f *faultyRefreshStore) RevokeRefreshTokenFamily(ctx context.Context, family uuid.UUID) error {
@@ -169,3 +167,18 @@ type testError string
 func (e testError) Error() string { return string(e) }
 
 const errTest = testError("injected failure")
+
+// storedKey returns the key with id from store, or nil.
+func storedKey(t *testing.T, store KeyStore, id uuid.UUID) *VerificationKey {
+	t.Helper()
+	keys, err := store.ListKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if k.ID == id {
+			return k
+		}
+	}
+	return nil
+}

@@ -18,11 +18,16 @@ Upgrading from v1? See [wiki/Migrating-from-v1.md](wiki/Migrating-from-v1.md).
   outdated hashes are upgraded automatically on login. A concurrency limit
   bounds memory use, and unknown users take as long to reject as wrong passwords.
 - **Tokens**: short-lived ES256 access tokens and refresh tokens that are
-  rotated on every use, with reuse detection that revokes the session.
-  Access and refresh tokens can't be swapped for each other.
-- **Keys**: signing keys rotate automatically. Private keys never leave the
-  process; only public keys are stored, so any number of instances can verify
-  each other's tokens, and other services can use the JWKS endpoint.
+  rotated on every use, with reuse detection that revokes the session. A
+  short grace period keeps concurrent refreshes (several browser tabs, a
+  retried request) from logging users out. Access and refresh tokens can't be
+  swapped for each other. `RevokeAllSessions` signs a user out everywhere,
+  for example after a password change.
+- **Keys**: signing keys rotate automatically and are published one rotation
+  interval before they start signing. Private keys never leave the process;
+  only public keys are stored, so any number of instances can verify each
+  other's tokens, and other services can use the JWKS endpoint. Tokens with
+  made-up key IDs can't flood your key store.
 - **HTTP**: optional and required authentication middleware, `Bearer` header
   and/or cookie support, RFC 6750 error responses.
 - **Small dependency footprint**: `golang-jwt/jwt`, `google/uuid` and

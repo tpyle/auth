@@ -14,7 +14,7 @@ import "github.com/tpyle/auth/v2"
 
 ## Create an Authorizer
 
-An `Authorizer` does all the work. Create it with `auth.New` and stop it with `Close`. `New` checks the configuration, generates the first signing key, stores its public half, and starts key rotation in the background. Only the setup work in `New` respects `ctx`. Rotation keeps running until you call `Close`.
+An `Authorizer` does all the work. Create it with `auth.New` and stop it with `Close`. `New` checks the configuration, generates the first signing key (and the next one, which is published ahead of use), stores their public halves, and starts key rotation in the background. Only the setup work in `New` respects `ctx`. Rotation keeps running until you call `Close`.
 
 ```go
 ctx := context.Background()
@@ -117,7 +117,7 @@ Trade a refresh token for a new pair. The old refresh token is spent once it is 
 newPair, err := a.Refresh(ctx, pair.RefreshToken)
 switch {
 case errors.Is(err, auth.ErrRefreshTokenReused):
-	// token was already used: the whole session has been revoked
+	// token was reused after the grace window: the whole session has been revoked
 case errors.Is(err, auth.ErrTokenRevoked):
 	// logged out
 case errors.Is(err, auth.ErrTokenExpired), errors.Is(err, auth.ErrInvalidToken):
@@ -127,7 +127,7 @@ case err != nil:
 }
 ```
 
-Clients must always save the new refresh token. If a client sends the same refresh token twice, even in two concurrent requests, the second request fails and the session is revoked. See [Tokens and Keys](Tokens-and-Keys.md#reuse-detection).
+Clients must always save the new refresh token. If the same refresh token is used again within `RefreshReuseGrace` (default 30s) of its first use, for example by two tabs refreshing at once or by a retry after a lost response, the second use also gets a new pair. A reuse after that window revokes the session. See [Tokens and Keys](Tokens-and-Keys.md#reuse-detection).
 
 ## Log out
 
@@ -138,6 +138,15 @@ if err := a.Logout(ctx, pair.RefreshToken); err != nil {
 ```
 
 `Logout` revokes the session that the refresh token belongs to. It accepts expired refresh tokens, and logging out twice is not an error. Access tokens already issued stay valid until they expire, so keep `AccessTokenTTL` short.
+
+To end **every** session of a user, for example after a password change, call `RevokeAllSessions`. To keep the current device signed in, issue it a new pair:
+
+```go
+if err := a.RevokeAllSessions(ctx, "alice"); err != nil {
+	return err
+}
+pair, err := a.IssueTokenPair(ctx, "alice", nil)
+```
 
 ## Complete program
 

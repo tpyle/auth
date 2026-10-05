@@ -69,7 +69,7 @@ func TestServerFlow(t *testing.T) {
 	if _, hello := do("GET", "/hello", "", access); hello["hello"] != "alice" {
 		t.Errorf("/hello authed: %v", hello)
 	}
-	if resp, jwks := do("GET", "/.well-known/jwks.json", "", ""); resp.StatusCode != http.StatusOK || len(jwks["keys"].([]any)) != 1 {
+	if resp, jwks := do("GET", "/.well-known/jwks.json", "", ""); resp.StatusCode != http.StatusOK || len(jwks["keys"].([]any)) != 2 { // current and pre-published next key
 		t.Errorf("jwks: %d %v", resp.StatusCode, jwks)
 	}
 

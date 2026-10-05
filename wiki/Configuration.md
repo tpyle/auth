@@ -19,8 +19,9 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 | `MaxConcurrentHashes` | `max_concurrent_hashes` | `max(1, runtime.NumCPU() / 4)` | Maximum number of Argon2 computations at once. Extra callers wait or give up when their `ctx` is cancelled. Peak hashing memory is about this × `MemoryKiB`. Must be ≥ 1. |
 | `AccessTokenTTL` | `access_token_ttl` | `15m` | Lifetime of access tokens. Must be > 0. |
 | `RefreshTokenTTL` | `refresh_token_ttl` | `168h` (7 days) | Lifetime of each refresh token. Each refresh issues a new one, so a session lasts as long as it is refreshed at least this often. Must be > 0. |
-| `KeyRotationInterval` | `key_rotation_interval` | `24h` | How often a new signing key is generated. `0` turns rotation off: the process signs with one key for its whole life, and stored keys never expire, so they pile up across restarts. Must be ≥ 0. |
-| `KeyCacheTTL` | `key_cache_ttl` | `5m` | How long a verification key fetched from the `KeyStore` is cached. A key deleted from the store can keep working for up to this long. `0` turns caching off. Must be ≥ 0. |
+| `RefreshReuseGrace` | `refresh_reuse_grace` | `30s` | How long after a refresh token's **first** use it may be presented again and still get a new pair in the same session, instead of being treated as stolen. Covers concurrent refreshes (several tabs) and retries after a lost response. `0` is strict: any reuse revokes the session. Must be ≥ 0. See [reuse detection](Tokens-and-Keys.md#reuse-detection). |
+| `KeyRotationInterval` | `key_rotation_interval` | `24h` | How often this process switches to a new signing key. Each key is stored one interval before it starts signing. `0` turns rotation off: the process signs with one key for its whole life, and stored keys never expire, so they pile up across restarts. Must be ≥ 0. |
+| `KeyCacheTTL` | `key_cache_ttl` | `5m` | How often each instance reloads its in-memory copy of the key set from the `KeyStore` with `ListKeys`. Unknown key IDs also trigger a reload, at most once per second. A key deleted from the store can keep working for up to this long. `0` reloads on every verification of another instance's token, still at most once per second. Must be ≥ 0. |
 | `Issuer` | `issuer` | `""` | If set, written to `iss` and required on verification. |
 | `Audience` | `audience` | `nil` | If set, written to `aud`. Verification requires the token's `aud` to contain at least one of these values. |
 | `Leeway` | `leeway` | `0` | Allowed clock skew when checking `exp` and `iat`. Must be ≥ 0. |
@@ -38,6 +39,7 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 | `WithMaxConcurrentHashes(n int)` | Sets `Config.MaxConcurrentHashes`. |
 | `WithAccessTokenTTL(d)` | Sets `Config.AccessTokenTTL`. |
 | `WithRefreshTokenTTL(d)` | Sets `Config.RefreshTokenTTL`. |
+| `WithRefreshReuseGrace(d)` | Sets `Config.RefreshReuseGrace`. |
 | `WithKeyRotationInterval(d)` | Sets `Config.KeyRotationInterval`. |
 | `WithKeyCacheTTL(d)` | Sets `Config.KeyCacheTTL`. |
 | `WithIssuer(iss string)` | Sets `Config.Issuer`. |
@@ -47,7 +49,7 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 | `WithAuthCookie(name string)` | Sets `Config.AuthCookie`. `""` turns it off. |
 | `WithUserStore(UserStore)` | Needed by `Authenticate` and `Login`. |
 | `WithKeyStore(KeyStore)` | Where public signing keys are persisted. Default: a private `MemoryKeyStore`. |
-| `WithRefreshTokenStore(RefreshTokenStore)` | Turns on refresh tokens, `Refresh` and `Logout`. |
+| `WithRefreshTokenStore(RefreshTokenStore)` | Turns on refresh tokens, `Refresh`, `Logout` and `RevokeAllSessions`. |
 | `WithClaimsProvider(ClaimsProvider)` | Adds extra access-token claims on `Login` and `Refresh`. |
 | `WithUnauthorizedHandler(UnauthorizedHandler)` | Replaces the response written by `RequireAuthHandler` when it rejects a request. See [HTTP Middleware](HTTP-Middleware.md). |
 | `WithLogger(*slog.Logger)` | Logger for background errors (key rotation), failed hash upgrades and middleware internal errors. Default: `slog.Default()`. |
@@ -131,6 +133,7 @@ auth:
   max_concurrent_hashes: 8
   access_token_ttl: 15m
   refresh_token_ttl: 168h      # Go durations have no "d" unit
+  refresh_reuse_grace: 30s     # 0 = strict reuse detection
   key_rotation_interval: 24h
   key_cache_ttl: 5m
   issuer: https://auth.example.com

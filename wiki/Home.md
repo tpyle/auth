@@ -12,8 +12,9 @@ import "github.com/tpyle/auth/v2"
 - **Login timing equalization.** Unknown users are checked against a dummy hash, so they take about as long to reject as a wrong password.
 - **Bounded hashing memory.** A semaphore caps concurrent Argon2 computations.
 - **ES256 (P-256 ECDSA) JWTs** for access tokens and refresh tokens. Each kind is rejected where the other is expected.
-- **Refresh-token rotation with reuse detection.** Each refresh token works once. Presenting a spent token revokes the whole session ("family").
-- **Automatic signing-key rotation.** Private keys stay in process memory. Only public keys are persisted, so several instances can verify each other's tokens through a shared `KeyStore`.
+- **Refresh-token rotation with reuse detection.** Each refresh token is exchanged once. Presenting a spent token revokes the whole session ("family"). A short grace window (default 30s) tolerates concurrent refreshes from several tabs and retries.
+- **Revoke all sessions** for a user, e.g. after a password change.
+- **Automatic signing-key rotation.** Private keys stay in process memory. Only public keys are persisted, so several instances can verify each other's tokens through a shared `KeyStore`. Each key is published one rotation interval before it starts signing, and verification keys are cached in memory, with reloads rate-limited.
 - **Optional `iss`/`aud` claims** with enforcement on verification.
 - **net/http middleware** for optional and required authentication, using a `Bearer` header or a cookie.
 - **JWKS endpoint** so other services can verify tokens with any standard JWT library.

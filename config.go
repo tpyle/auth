@@ -36,13 +36,24 @@ type Config struct {
 	// refreshed at least this often.
 	RefreshTokenTTL time.Duration `mapstructure:"refresh_token_ttl"`
 
-	// KeyRotationInterval is how often a new signing key is generated. Zero
-	// disables rotation: the process signs with one key for its lifetime and
-	// stored keys never expire, so they accumulate across restarts.
+	// RefreshReuseGrace is how long after a refresh token's first use it may
+	// be presented again without being treated as stolen. A reuse inside the
+	// window gets a new token pair in the same session, which tolerates
+	// clients (such as several browser tabs) that refresh concurrently or
+	// retry after a lost response. A reuse after the window revokes the
+	// session. Zero disables the grace period.
+	RefreshReuseGrace time.Duration `mapstructure:"refresh_reuse_grace"`
+
+	// KeyRotationInterval is how often this process switches to a new
+	// signing key. Each key is stored one interval before it starts signing,
+	// so verifiers and JWKS consumers see it well in advance. Zero disables
+	// rotation: the process signs with one key for its lifetime and stored
+	// keys never expire, so they accumulate across restarts.
 	KeyRotationInterval time.Duration `mapstructure:"key_rotation_interval"`
-	// KeyCacheTTL is how long a verification key fetched from the [KeyStore]
-	// is cached in memory. Deleting a key from the store takes up to this long
-	// to take effect.
+	// KeyCacheTTL is how often the in-memory copy of the [KeyStore]'s key
+	// set is reloaded. Deleting a key from the store takes up to this long to
+	// take effect. Unknown key IDs also trigger a reload, at most once per
+	// second.
 	KeyCacheTTL time.Duration `mapstructure:"key_cache_ttl"`
 
 	// Issuer, when set, is written to the "iss" claim and required on
@@ -70,6 +81,7 @@ func DefaultConfig() Config {
 		MaxConcurrentHashes: max(1, runtime.NumCPU()/int(argon.Parallelism)),
 		AccessTokenTTL:      15 * time.Minute,
 		RefreshTokenTTL:     7 * 24 * time.Hour,
+		RefreshReuseGrace:   30 * time.Second,
 		KeyRotationInterval: 24 * time.Hour,
 		KeyCacheTTL:         5 * time.Minute,
 		AuthHeader:          "Authorization",
@@ -90,6 +102,9 @@ func (c Config) Validate() error {
 	}
 	if c.RefreshTokenTTL <= 0 {
 		errs = append(errs, errors.New("auth: RefreshTokenTTL must be positive"))
+	}
+	if c.RefreshReuseGrace < 0 {
+		errs = append(errs, errors.New("auth: RefreshReuseGrace must not be negative"))
 	}
 	if c.KeyRotationInterval < 0 {
 		errs = append(errs, errors.New("auth: KeyRotationInterval must not be negative"))
@@ -176,6 +191,11 @@ func WithAccessTokenTTL(d time.Duration) Option {
 // WithRefreshTokenTTL sets [Config.RefreshTokenTTL].
 func WithRefreshTokenTTL(d time.Duration) Option {
 	return func(s *settings) { s.RefreshTokenTTL = d }
+}
+
+// WithRefreshReuseGrace sets [Config.RefreshReuseGrace].
+func WithRefreshReuseGrace(d time.Duration) Option {
+	return func(s *settings) { s.RefreshReuseGrace = d }
 }
 
 // WithKeyRotationInterval sets [Config.KeyRotationInterval].

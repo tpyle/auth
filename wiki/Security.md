@@ -48,6 +48,7 @@ If `LookupPasswordHash` returns `ErrUserNotFound`, `Authenticate` still runs a f
 - **Key rotation** (default every 24h) limits how long a key is in use. See [Tokens and Keys](Tokens-and-Keys.md#signing-key-rotation).
 - **Access and refresh tokens cannot be swapped.** The `typ` claim is checked on every verification.
 - **Refresh-token reuse detection** revokes a session when a stolen refresh token is used after (or before) the real client uses it.
+- **Reuse grace period trade-off.** `RefreshReuseGrace` (default 30s) lets a spent refresh token be used again for a short time after its first use without revoking anything. This keeps users logged in when several tabs refresh at once or a response is lost. The cost: an attacker who replays a stolen token **within that window** gets a working session, and the theft is not detected. The window is fixed from the first use and does not slide. Keep it to seconds. Set it to 0 for strict detection if your clients never refresh concurrently. See [reuse detection](Tokens-and-Keys.md#reuse-detection).
 
 ### Issuer and audience
 
@@ -69,8 +70,8 @@ With these set, tokens must carry a matching `iss` and an `aud` that includes on
 - **Refresh tokens on clients:**
   - Browsers: an `HttpOnly`, `Secure`, `SameSite=Strict` cookie scoped to the refresh/logout path. Never `localStorage`.
   - Mobile/desktop: the platform keystore (iOS Keychain, Android Keystore).
-  - Always replace the stored refresh token with the new one from each refresh, and allow only one refresh in flight at a time. See [reuse detection](Tokens-and-Keys.md#reuse-detection).
+  - Always replace the stored refresh token with the new one from each refresh. If you run with `RefreshReuseGrace = 0`, also allow only one refresh in flight at a time. See [reuse detection](Tokens-and-Keys.md#reuse-detection).
 - **Treat `ErrRefreshTokenReused` as a security signal.** Log it with the subject and alert on spikes.
-- **Ending all sessions after a password change** has to be done in your own store (delete the user's refresh token records). See [Tokens and Keys](Tokens-and-Keys.md#logout).
+- **End all sessions after a password change or account disable** with `RevokeAllSessions(ctx, subject)`, then issue a new pair for the current device with `IssueTokenPair`. Access tokens already issued stay valid until they expire. See [Tokens and Keys](Tokens-and-Keys.md#revoking-all-sessions).
 - **External verifiers** must check the `at+jwt` header type (or `typ == "access"` in the payload). See [JWKS](Tokens-and-Keys.md#jwks).
 - **Don't log tokens** or password inputs. Errors from this package never contain them.

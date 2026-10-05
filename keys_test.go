@@ -13,31 +13,55 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
-func TestFirstKeyIsStoredWithExpiry(t *testing.T) {
+// nextID returns the ID of the pre-generated next key, or uuid.Nil.
+func (km *keyManager) nextID() uuid.UUID {
+	km.rotMu.Lock()
+	defer km.rotMu.Unlock()
+	if km.next == nil {
+		return uuid.Nil
+	}
+	return km.next.id
+}
+
+func TestNewStoresCurrentAndNextKeys(t *testing.T) {
 	clock := newFakeClock()
 	keys := NewMemoryKeyStore()
 	a := newTestAuthorizer(t, WithKeyStore(keys), WithClock(clock.Now),
 		WithKeyRotationInterval(time.Hour), WithAccessTokenTTL(time.Minute), WithRefreshTokenTTL(24*time.Hour))
 
-	stored, err := keys.GetKey(context.Background(), a.keys.current.Load().id)
-	if err != nil {
-		t.Fatalf("current key not in store: %v", err)
+	cur := storedKey(t, keys, a.keys.current.Load().id)
+	next := storedKey(t, keys, a.keys.nextID())
+	if cur == nil || next == nil {
+		t.Fatalf("current %v / next %v not stored", cur, next)
 	}
-	want := clock.Now().Add(time.Hour + 24*time.Hour + keyRetentionMargin)
-	if !stored.ExpiresAt.Equal(want) || !stored.CreatedAt.Equal(clock.Now()) {
-		t.Errorf("CreatedAt %v ExpiresAt %v; want %v, %v", stored.CreatedAt, stored.ExpiresAt, clock.Now(), want)
+	retention := 24*time.Hour + keyRetentionMargin
+	if want := clock.Now().Add(time.Hour + retention); !cur.ExpiresAt.Equal(want) {
+		t.Errorf("current ExpiresAt = %v; want %v", cur.ExpiresAt, want)
+	}
+	// The next key starts signing one interval from now, so it is retained
+	// one interval longer.
+	if want := clock.Now().Add(2*time.Hour + retention); !next.ExpiresAt.Equal(want) {
+		t.Errorf("next ExpiresAt = %v; want %v", next.ExpiresAt, want)
+	}
+	set, _ := a.JWKS(context.Background())
+	if len(set.Keys) != 2 {
+		t.Errorf("JWKS has %d keys; want current and next", len(set.Keys))
 	}
 }
 
 func TestKeysNeverExpireWithoutRotation(t *testing.T) {
 	keys := NewMemoryKeyStore()
 	a := newTestAuthorizer(t, WithKeyStore(keys), WithKeyRotationInterval(0))
-	stored, _ := keys.GetKey(context.Background(), a.keys.current.Load().id)
-	if !stored.ExpiresAt.IsZero() {
-		t.Errorf("ExpiresAt = %v; want zero", stored.ExpiresAt)
+	list, _ := keys.ListKeys(context.Background())
+	if len(list) != 1 || !list[0].ExpiresAt.IsZero() {
+		t.Errorf("keys = %+v; want one key that never expires", list)
+	}
+	if a.keys.nextID() != uuid.Nil {
+		t.Error("next key generated with rotation disabled")
 	}
 }
 
@@ -49,29 +73,79 @@ func TestNewFailsWhenKeyCannotBeStored(t *testing.T) {
 	}
 }
 
+func TestNewFailsWhenNextKeyCannotBeStored(t *testing.T) {
+	keys := &failAfterStore{KeyStore: NewMemoryKeyStore(), ok: 1}
+	if _, err := New(context.Background(), WithKeyStore(keys)); !errors.Is(err, errTest) {
+		t.Errorf("err = %v; want errTest", err)
+	}
+}
+
+// failAfterStore fails every StoreKey call after the first ok calls.
+type failAfterStore struct {
+	KeyStore
+	ok int
+}
+
+func (f *failAfterStore) StoreKey(ctx context.Context, k *VerificationKey) error {
+	if f.ok == 0 {
+		return errTest
+	}
+	f.ok--
+	return f.KeyStore.StoreKey(ctx, k)
+}
+
 func TestNewToleratesCleanupFailure(t *testing.T) {
 	keys := newFaultyKeyStore()
 	keys.fail(&keys.listErr, errTest)
 	newTestAuthorizer(t, WithKeyStore(keys))
 }
 
-func TestRotationKeepsOldTokensValid(t *testing.T) {
-	a := newTestAuthorizer(t)
+func TestRotationUsesPregeneratedKey(t *testing.T) {
 	ctx := context.Background()
+	a := newTestAuthorizer(t)
 	before, _ := a.IssueAccessToken("bob", nil)
-	oldID := a.keys.current.Load().id
+	next := a.keys.nextID()
 
 	if err := a.keys.rotate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if a.keys.current.Load().id == oldID {
-		t.Fatal("rotate did not change the current key")
+	if got := a.keys.current.Load().id; got != next {
+		t.Fatalf("current = %s; want pre-generated %s", got, next)
+	}
+	if a.keys.nextID() != uuid.Nil {
+		t.Error("next key not cleared after rotation")
 	}
 	after, _ := a.IssueAccessToken("bob", nil)
 	for _, tok := range []string{before, after} {
 		if _, err := a.VerifyAccessToken(ctx, tok); err != nil {
 			t.Errorf("verify after rotation: %v", err)
 		}
+	}
+}
+
+func TestRotateWithoutPregeneratedKey(t *testing.T) {
+	ctx := context.Background()
+	keys := newFaultyKeyStore()
+	a := newTestAuthorizer(t, WithKeyStore(keys))
+	if err := a.keys.rotate(ctx); err != nil { // uses up the next key
+		t.Fatal(err)
+	}
+	cur := a.keys.current.Load().id
+
+	keys.fail(&keys.storeErr, errTest)
+	if err := a.keys.rotate(ctx); !errors.Is(err, errTest) {
+		t.Errorf("err = %v; want errTest", err)
+	}
+	if a.keys.current.Load().id != cur {
+		t.Error("current key changed although no new key could be stored")
+	}
+
+	keys.fail(&keys.storeErr, nil)
+	if err := a.keys.rotate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a.keys.current.Load().id == cur || storedKey(t, keys, a.keys.current.Load().id) == nil {
+		t.Error("rotation did not generate and store a fresh key")
 	}
 }
 
@@ -84,19 +158,22 @@ func TestCleanup(t *testing.T) {
 	if err := a.keys.rotate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.keys.ensureNext(ctx, clock.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 
 	// Long after everything expired, cleanup removes the old key but never
-	// the current one, even though it is past its own ExpiresAt.
+	// the current or next key, even though they are past ExpiresAt.
 	clock.Advance(365 * 24 * time.Hour)
 	if err := a.keys.cleanup(ctx); err != nil {
 		t.Fatal(err)
 	}
 	list, _ := keys.ListKeys(ctx)
-	if len(list) != 1 || list[0].ID != a.keys.current.Load().id {
-		t.Errorf("remaining keys = %v; want only the current key", list)
+	if len(list) != 2 || storedKey(t, keys, a.keys.current.Load().id) == nil || storedKey(t, keys, a.keys.nextID()) == nil {
+		t.Errorf("remaining keys = %v; want only current and next", list)
 	}
-	if len(a.keys.cache) != 0 {
-		t.Errorf("cache still holds %d expired keys", len(a.keys.cache))
+	if len(a.keys.known) != 2 {
+		t.Errorf("in-memory set holds %d keys; want 2", len(a.keys.known))
 	}
 	clock.Advance(-365 * 24 * time.Hour)
 	if _, err := a.VerifyAccessToken(ctx, oldTok); !errors.Is(err, ErrInvalidToken) {
@@ -118,13 +195,113 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-// otherInstance returns a second Authorizer sharing keys, to exercise lookups
+// otherInstance returns another Authorizer sharing keys, to exercise lookups
 // of keys that are not the verifier's own current key.
 func otherInstance(t *testing.T, keys KeyStore, opts ...Option) *Authorizer {
 	return newTestAuthorizer(t, append([]Option{WithKeyStore(keys)}, opts...)...)
 }
 
-func TestLookupFromStoreAndCache(t *testing.T) {
+func TestLookupCachesKeySet(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	keys := newFaultyKeyStore()
+	issuer := otherInstance(t, keys, WithClock(clock.Now))
+	verifier := otherInstance(t, keys, WithClock(clock.Now), WithKeyCacheTTL(time.Minute))
+	tok, _ := issuer.IssueAccessToken("bob", nil)
+	base := keys.listCalls.Load()
+
+	for range 3 {
+		if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := keys.listCalls.Load() - base; n != 1 {
+		t.Errorf("ListKeys called %d times; want 1 (cached)", n)
+	}
+	clock.Advance(time.Minute)
+	if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	if n := keys.listCalls.Load() - base; n != 2 {
+		t.Errorf("ListKeys called %d times; want 2 after KeyCacheTTL", n)
+	}
+}
+
+// A rotated-in key was stored an interval earlier, so a verifier that has
+// loaded the key set since then knows it without another store call.
+func TestPregeneratedKeyIsKnownBeforeUse(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	keys := newFaultyKeyStore()
+	issuer := otherInstance(t, keys, WithClock(clock.Now))
+	verifier := otherInstance(t, keys, WithClock(clock.Now))
+	first, _ := issuer.IssueAccessToken("bob", nil)
+	if _, err := verifier.VerifyAccessToken(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	base := keys.listCalls.Load()
+
+	if err := issuer.keys.rotate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := issuer.IssueAccessToken("bob", nil)
+	if _, err := verifier.VerifyAccessToken(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if n := keys.listCalls.Load() - base; n != 0 {
+		t.Errorf("ListKeys called %d times; the pre-published key should already be known", n)
+	}
+}
+
+func TestUnknownKeyIDsAreRateLimited(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	keys := newFaultyKeyStore()
+	a := newTestAuthorizer(t, WithKeyStore(keys), WithClock(clock.Now))
+	now := clock.Now().Unix()
+	forged := func() string {
+		mc := jwt.MapClaims{"sub": "bob", "iat": now, "exp": now + 60, "jti": uuid.NewString(), "typ": "access"}
+		return signRaw(t, a, mc, map[string]any{"kid": uuid.NewString()})
+	}
+	base := keys.listCalls.Load()
+
+	for range 50 {
+		if _, err := a.VerifyAccessToken(ctx, forged()); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("err = %v; want ErrInvalidToken", err)
+		}
+	}
+	if n := keys.listCalls.Load() - base; n != 1 {
+		t.Errorf("ListKeys called %d times for 50 unknown kids; want 1", n)
+	}
+	clock.Advance(keyRefreshMinInterval)
+	_, _ = a.VerifyAccessToken(ctx, forged())
+	if n := keys.listCalls.Load() - base; n != 2 {
+		t.Errorf("ListKeys called %d times after the rate-limit interval; want 2", n)
+	}
+}
+
+// A brand-new instance's first key is found by the reload triggered by the
+// unknown kid.
+func TestNewInstanceKeyFoundOnMiss(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	keys := NewMemoryKeyStore()
+	verifier := otherInstance(t, keys, WithClock(clock.Now))
+	early := otherInstance(t, keys, WithClock(clock.Now))
+	tok, _ := early.IssueAccessToken("bob", nil)
+	if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(keyRefreshMinInterval)
+	late := otherInstance(t, keys, WithClock(clock.Now))
+	tok, _ = late.IssueAccessToken("bob", nil)
+	if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
+		t.Errorf("new instance's token rejected: %v", err)
+	}
+}
+
+func TestLookupStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	keys := newFaultyKeyStore()
@@ -132,103 +309,84 @@ func TestLookupFromStoreAndCache(t *testing.T) {
 	verifier := otherInstance(t, keys, WithClock(clock.Now), WithKeyCacheTTL(time.Minute))
 	tok, _ := issuer.IssueAccessToken("bob", nil)
 
-	for range 3 {
-		if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
-			t.Fatal(err)
+	keys.fail(&keys.listErr, errTest)
+	for i := range 2 { // the second call is rate-limited but reports the same failure
+		_, err := verifier.VerifyAccessToken(ctx, tok)
+		if !errors.Is(err, errTest) || errors.Is(err, ErrInvalidToken) {
+			t.Errorf("call %d: err = %v; want internal errTest", i, err)
 		}
 	}
-	if n := keys.getCalls.Load(); n != 1 {
-		t.Errorf("GetKey called %d times; want 1 (cached)", n)
-	}
-	clock.Advance(time.Minute)
+
+	// Once the key is known, a store outage does not break verification.
+	keys.fail(&keys.listErr, nil)
+	clock.Advance(keyRefreshMinInterval)
 	if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
 		t.Fatal(err)
 	}
-	if n := keys.getCalls.Load(); n != 2 {
-		t.Errorf("GetKey called %d times; want 2 after cache TTL", n)
+	keys.fail(&keys.listErr, errTest)
+	clock.Advance(time.Minute)
+	if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
+		t.Errorf("known key rejected during store outage: %v", err)
 	}
 }
 
-func TestLookupWithoutCache(t *testing.T) {
+func TestLookupSkipsMalformedStoredKeys(t *testing.T) {
 	ctx := context.Background()
-	keys := newFaultyKeyStore()
-	issuer := otherInstance(t, keys)
-	verifier := otherInstance(t, keys, WithKeyCacheTTL(0))
+	keys := NewMemoryKeyStore()
+	a := newTestAuthorizer(t, WithKeyStore(keys))
+	id := uuid.New()
+	_ = keys.StoreKey(ctx, &VerificationKey{ID: id})
+	mc := jwt.MapClaims{"sub": "bob", "iat": time.Now().Unix(), "exp": time.Now().Unix() + 60, "jti": uuid.NewString(), "typ": "access"}
+	if _, err := a.VerifyAccessToken(ctx, signRaw(t, a, mc, map[string]any{"kid": id.String()})); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("err = %v; want ErrInvalidToken", err)
+	}
+}
+
+func TestLookupExpiredKey(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	keys := NewMemoryKeyStore()
+	issuer := otherInstance(t, keys, WithClock(clock.Now), WithKeyRotationInterval(time.Hour))
+	verifier := otherInstance(t, keys, WithClock(clock.Now), WithLeeway(1000*time.Hour))
 	tok, _ := issuer.IssueAccessToken("bob", nil)
-	for range 2 {
-		if _, err := verifier.VerifyAccessToken(ctx, tok); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if n := keys.getCalls.Load(); n != 2 {
-		t.Errorf("GetKey called %d times; want 2", n)
+	clock.Advance(time.Hour + 7*24*time.Hour + keyRetentionMargin + time.Second)
+	if _, err := verifier.VerifyAccessToken(ctx, tok); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("err = %v; want ErrInvalidToken", err)
 	}
 }
 
-func TestLookupErrors(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("store failure is internal", func(t *testing.T) {
-		keys := newFaultyKeyStore()
-		issuer := otherInstance(t, keys)
-		verifier := otherInstance(t, keys)
-		tok, _ := issuer.IssueAccessToken("bob", nil)
-		keys.fail(&keys.getErr, errTest)
-		_, err := verifier.VerifyAccessToken(ctx, tok)
-		if !errors.Is(err, errTest) || errors.Is(err, ErrInvalidToken) {
-			t.Errorf("err = %v; want internal errTest", err)
-		}
-	})
-
-	t.Run("store returns nil key", func(t *testing.T) {
-		keys := newFaultyKeyStore()
-		issuer := otherInstance(t, keys)
-		verifier := otherInstance(t, keys)
-		tok, _ := issuer.IssueAccessToken("bob", nil)
-		keys.nilGet = true
-		if _, err := verifier.VerifyAccessToken(ctx, tok); err == nil || errors.Is(err, ErrInvalidToken) {
-			t.Errorf("err = %v; want internal error", err)
-		}
-	})
-
-	t.Run("expired key", func(t *testing.T) {
-		clock := newFakeClock()
-		keys := NewMemoryKeyStore()
-		issuer := otherInstance(t, keys, WithClock(clock.Now), WithKeyRotationInterval(time.Hour))
-		verifier := otherInstance(t, keys, WithClock(clock.Now), WithLeeway(1000*time.Hour))
-		tok, _ := issuer.IssueAccessToken("bob", nil)
-		clock.Advance(time.Hour + 7*24*time.Hour + keyRetentionMargin + time.Second)
-		if _, err := verifier.VerifyAccessToken(ctx, tok); !errors.Is(err, ErrInvalidToken) {
-			t.Errorf("err = %v; want ErrInvalidToken", err)
-		}
-	})
+func newLoopAuthorizer(t *testing.T, keys KeyStore) *Authorizer {
+	a, err := New(t.Context(), WithKeyStore(keys), WithLogger(discardLogger),
+		WithKeyRotationInterval(time.Hour), WithAccessTokenTTL(time.Minute), WithRefreshTokenTTL(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
 
 func TestRotationLoop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		keys := NewMemoryKeyStore()
-		a, err := New(t.Context(), WithKeyStore(keys), WithLogger(discardLogger),
-			WithKeyRotationInterval(time.Hour), WithAccessTokenTTL(time.Minute), WithRefreshTokenTTL(time.Minute))
-		if err != nil {
-			t.Fatal(err)
-		}
-		first := a.keys.current.Load().id
+		a := newLoopAuthorizer(t, keys)
+		first, next := a.keys.current.Load().id, a.keys.nextID()
 
-		time.Sleep(time.Hour + time.Second)
+		time.Sleep(time.Hour)
 		synctest.Wait()
-		second := a.keys.current.Load().id
-		if second == first {
-			t.Fatal("key was not rotated after one interval")
+		if got := a.keys.current.Load().id; got != next {
+			t.Fatalf("after one interval current = %s; want pre-generated %s", got, next)
+		}
+		if n := a.keys.nextID(); n == uuid.Nil || n == next {
+			t.Error("a new next key was not pre-generated")
 		}
 
 		// After the first key's retention window, a rotation deletes it.
 		time.Sleep(time.Hour)
 		synctest.Wait()
-		if _, err := keys.GetKey(context.Background(), first); !errors.Is(err, ErrKeyNotFound) {
-			t.Errorf("first key still stored: %v", err)
+		if storedKey(t, keys, first) != nil {
+			t.Error("first key still stored")
 		}
-		if _, err := keys.GetKey(context.Background(), second); err != nil {
-			t.Errorf("second key deleted too early: %v", err)
+		if storedKey(t, keys, next) == nil {
+			t.Error("second key deleted too early")
 		}
 
 		if err := a.Close(); err != nil {
@@ -240,27 +398,49 @@ func TestRotationLoop(t *testing.T) {
 	})
 }
 
-func TestRotationLoopRetriesFailures(t *testing.T) {
+// A store outage at rotation time does not delay rotation, because the next
+// key was stored an interval earlier.
+func TestRotationLoopSurvivesStoreOutage(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		keys := newFaultyKeyStore()
-		a, err := New(t.Context(), WithKeyStore(keys), WithLogger(discardLogger), WithKeyRotationInterval(time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
+		a := newLoopAuthorizer(t, keys)
 		defer a.Close()
-		first := a.keys.current.Load().id
+		next := a.keys.nextID()
 
 		keys.fail(&keys.storeErr, errTest)
-		time.Sleep(time.Hour + time.Second)
+		time.Sleep(time.Hour)
 		synctest.Wait()
-		if a.keys.current.Load().id != first {
-			t.Fatal("key changed even though storing it failed")
+		if a.keys.current.Load().id != next {
+			t.Fatal("rotation did not use the pre-generated key")
+		}
+		if a.keys.nextID() != uuid.Nil {
+			t.Fatal("next key reported although storing it failed")
 		}
 
 		keys.fail(&keys.storeErr, nil)
 		time.Sleep(rotationRetryDelay)
 		synctest.Wait()
-		if a.keys.current.Load().id == first {
+		if a.keys.nextID() == uuid.Nil {
+			t.Error("next key was not regenerated after rotationRetryDelay")
+		}
+	})
+}
+
+func TestRotationLoopRetriesWhenNoKeyAvailable(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		keys := newFaultyKeyStore()
+		a := newLoopAuthorizer(t, keys)
+		defer a.Close()
+
+		keys.fail(&keys.storeErr, errTest)
+		time.Sleep(2 * time.Hour) // first rotation uses next; the second has nothing
+		synctest.Wait()
+		stuck := a.keys.current.Load().id
+
+		keys.fail(&keys.storeErr, nil)
+		time.Sleep(rotationRetryDelay)
+		synctest.Wait()
+		if a.keys.current.Load().id == stuck {
 			t.Error("rotation was not retried after rotationRetryDelay")
 		}
 	})
@@ -269,14 +449,11 @@ func TestRotationLoopRetriesFailures(t *testing.T) {
 func TestRotationLoopLogsCleanupFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		keys := newFaultyKeyStore()
-		a, err := New(t.Context(), WithKeyStore(keys), WithLogger(discardLogger), WithKeyRotationInterval(time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
+		a := newLoopAuthorizer(t, keys)
 		defer a.Close()
 		first := a.keys.current.Load().id
 		keys.fail(&keys.listErr, errTest)
-		time.Sleep(time.Hour + time.Second)
+		time.Sleep(time.Hour)
 		synctest.Wait()
 		if a.keys.current.Load().id == first {
 			t.Error("cleanup failure prevented rotation")

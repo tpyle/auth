@@ -39,12 +39,13 @@ v2 is a redesign. The API is not source-compatible, and **all tokens issued by v
 |---|---|
 | `WithLookupUserPasswordFunc(func(username) (string, error))` | `WithUserStore(UserStore)`: `LookupPasswordHash(ctx, username)`. Must return `ErrUserNotFound` for unknown users. Optionally also implement `PasswordHashUpdater`. |
 | `WithStoreNewSigningKeyFunc` | `KeyStore.StoreKey` |
-| `WithGetSigningKeyFunc` | `KeyStore.GetKey` (return `ErrKeyNotFound`) |
+| `WithGetSigningKeyFunc` | Removed. There is no single-key lookup: each `Authorizer` keeps an in-memory copy of the key set loaded with `ListKeys` ([details](Tokens-and-Keys.md#key-set-cache)). |
 | `WithGetSigningKeysFunc` | `KeyStore.ListKeys` |
 | `WithDeleteExpiredSigningKeyFunc`, `WithDeleteExpiredSigningKeysFunc` | `KeyStore.DeleteKeys` |
-| `WithLookupRefreshTokenFunc` | `RefreshTokenStore.ConsumeRefreshToken` (atomic look up and mark used) |
+| `WithLookupRefreshTokenFunc` | `RefreshTokenStore.ConsumeRefreshToken(ctx, id, now)` (atomically sets `UsedAt` if unset and returns the previous record) |
 | `WithStoreRefreshTokenFunc` | `RefreshTokenStore.CreateRefreshToken` |
 | `WithDeleteRefreshTokenFunc` | `RefreshTokenStore.RevokeRefreshTokenFamily` |
+| (none) | `RefreshTokenStore.RevokeRefreshTokensForSubject`, used by the new `Authorizer.RevokeAllSessions` |
 
 Pass them with `WithKeyStore(...)` and `WithRefreshTokenStore(...)`.
 
@@ -67,7 +68,7 @@ Pass them with `WithKeyStore(...)` and `WithRefreshTokenStore(...)`.
 | `WithAuthCookie(*string)` (`nil` = off) | `WithAuthCookie(string)` (`""` = off) |
 | `WithViper(v)`, `WithViperPrefix(v, prefix)` | `cfg := auth.DefaultConfig(); v.UnmarshalKey("auth", &cfg)` then `WithConfig(cfg)` |
 
-New in v2: `WithMaxConcurrentHashes`, `WithKeyCacheTTL`, `WithIssuer`, `WithAudience`, `WithLeeway`, `WithClaimsProvider`, `WithUnauthorizedHandler`, `WithLogger`, `WithClock`.
+New in v2: `WithMaxConcurrentHashes`, `WithRefreshReuseGrace`, `WithKeyCacheTTL`, `WithIssuer`, `WithAudience`, `WithLeeway`, `WithClaimsProvider`, `WithUnauthorizedHandler`, `WithLogger`, `WithClock`.
 
 Viper keys changed:
 
@@ -90,7 +91,7 @@ Viper keys changed:
 | `KeyPairWithCreationTime{ID, PublicKey, CreationTime}` | `VerificationKey{ID, PublicKey, CreatedAt, ExpiresAt}` |
 | `kp.GetPublicKeyAsBinary()` | `key.MarshalPublicKey()` (same PKIX DER encoding) |
 | `GetECDSAPublicKeyFromBinary(b)` | `ParsePublicKey(b)` (now rejects non-P-256 keys) |
-| `RefreshToken{ID, Rand, Subject}` | `RefreshTokenRecord{ID, FamilyID, Subject, IssuedAt, ExpiresAt, Used}` |
+| `RefreshToken{ID, Rand, Subject}` | `RefreshTokenRecord{ID, FamilyID, Subject, IssuedAt, ExpiresAt, UsedAt}` (with method `Used()`) |
 | `AuthorizerToken` (`jwt.Token`) / `tok.IsValid()` | `*Claims` (only returned when valid) |
 | `GetToken(ctx) *AuthorizerToken` | `ClaimsFromContext(ctx) (*Claims, bool)` |
 | `WithToken(ctx, tok)` | `ContextWithClaims(ctx, claims)` |
@@ -114,8 +115,8 @@ Other differences:
 - The cookie no longer overrides the header. In v2, a valid `Bearer` header wins.
 - `RequireAuthHandler` now puts the claims in the request context. Its 401 response has a `WWW-Authenticate` header and the body `{"error":"unauthorized"}` (v1: `{"message": "missing token"}`). Internal errors return 500.
 - Unknown users take as long as wrong passwords to reject, and both return `ErrInvalidCredentials`.
-- `Logout` revokes the whole session, including refresh tokens issued from it.
-- Refreshing **rotates** the refresh token. Reusing an old one revokes the session ([details](Tokens-and-Keys.md#reuse-detection)).
+- `Logout` revokes the whole session, including refresh tokens issued from it. The new `RevokeAllSessions(ctx, subject)` ends every session of a user.
+- Refreshing **rotates** the refresh token. Reusing an old one after the `RefreshReuseGrace` window (default 30s) revokes the session ([details](Tokens-and-Keys.md#reuse-detection)).
 - Background goroutines stop on `Close`. v1's tickers ran forever.
 - Signing keys rotate every 24h by default (v1: never).
 - The library no longer depends on Viper.
@@ -140,4 +141,4 @@ Every v1 access token and refresh token is rejected after the upgrade. They have
 
 ### Refresh-token storage: new schema
 
-The v1 refresh table (`id`, `rand`, `subject`) cannot be migrated: v2 records hold no `Rand` secret, and add `FamilyID`, `IssuedAt`, `ExpiresAt` and `Used`. Drop the old table and create the one in [Storage](Storage.md#postgresql). Likewise, replace the v1 signing-key table: v2 needs an `expires_at` column, and v1's stored keys are useless because their IDs never matched any token.
+The v1 refresh table (`id`, `rand`, `subject`) cannot be migrated: v2 records hold no `Rand` secret, and add `FamilyID`, `IssuedAt`, `ExpiresAt` and `UsedAt` (a nullable `used_at` timestamp). v2 also needs indexes on `family_id`, `subject` and `expires_at`. Drop the old table and create the one in [Storage](Storage.md#postgresql). Likewise, replace the v1 signing-key table: v2 needs an `expires_at` column, and v1's stored keys are useless because their IDs never matched any token.

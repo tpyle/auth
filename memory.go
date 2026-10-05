@@ -67,18 +67,6 @@ func (s *MemoryKeyStore) StoreKey(_ context.Context, key *VerificationKey) error
 	return nil
 }
 
-// GetKey implements [KeyStore].
-func (s *MemoryKeyStore) GetKey(_ context.Context, id uuid.UUID) (*VerificationKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	k, ok := s.keys[id]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrKeyNotFound, id)
-	}
-	c := *k
-	return &c, nil
-}
-
 // ListKeys implements [KeyStore].
 func (s *MemoryKeyStore) ListKeys(_ context.Context) ([]*VerificationKey, error) {
 	s.mu.RLock()
@@ -130,16 +118,18 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 }
 
 // ConsumeRefreshToken implements [RefreshTokenStore].
-func (s *MemoryRefreshTokenStore) ConsumeRefreshToken(_ context.Context, id uuid.UUID) (RefreshTokenRecord, error) {
+func (s *MemoryRefreshTokenStore) ConsumeRefreshToken(_ context.Context, id uuid.UUID, now time.Time) (RefreshTokenRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.records[id]
 	if !ok {
 		return RefreshTokenRecord{}, fmt.Errorf("%w: %s", ErrRefreshTokenNotFound, id)
 	}
-	used := rec
-	used.Used = true
-	s.records[id] = used
+	if !rec.Used() {
+		used := rec
+		used.UsedAt = now
+		s.records[id] = used
+	}
 	return rec, nil
 }
 
@@ -149,6 +139,18 @@ func (s *MemoryRefreshTokenStore) RevokeRefreshTokenFamily(_ context.Context, fa
 	defer s.mu.Unlock()
 	for id, r := range s.records {
 		if r.FamilyID == familyID {
+			delete(s.records, id)
+		}
+	}
+	return nil
+}
+
+// RevokeRefreshTokensForSubject implements [RefreshTokenStore].
+func (s *MemoryRefreshTokenStore) RevokeRefreshTokensForSubject(_ context.Context, subject string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, r := range s.records {
+		if r.Subject == subject {
 			delete(s.records, id)
 		}
 	}

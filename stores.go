@@ -77,13 +77,14 @@ func ParsePublicKey(der []byte) (*ecdsa.PublicKey, error) {
 // of a service can verify tokens signed by any other instance. Private keys
 // are never passed to the store.
 //
+// Each [Authorizer] keeps an in-memory copy of the key set, reloaded with
+// ListKeys every [Config.KeyCacheTTL] and, at most once per second, when a
+// token names a key it does not know.
+//
 // Implementations must be safe for concurrent use.
 type KeyStore interface {
 	// StoreKey saves a new key.
 	StoreKey(ctx context.Context, key *VerificationKey) error
-	// GetKey returns the key with the given ID, or an error wrapping
-	// [ErrKeyNotFound].
-	GetKey(ctx context.Context, id uuid.UUID) (*VerificationKey, error)
 	// ListKeys returns all stored keys, including expired ones.
 	ListKeys(ctx context.Context) ([]*VerificationKey, error)
 	// DeleteKeys removes the given keys. Missing IDs must be ignored.
@@ -106,15 +107,21 @@ type RefreshTokenRecord struct {
 	// ExpiresAt is when the token expires. Stores may delete records after
 	// this time.
 	ExpiresAt time.Time
-	// Used is true once the token has been exchanged for a new one.
-	Used bool
+	// UsedAt is when the token was first exchanged for a new one. The zero
+	// value means it has not been used.
+	UsedAt time.Time
+}
+
+// Used reports whether the token has been exchanged for a new one.
+func (r RefreshTokenRecord) Used() bool {
+	return !r.UsedAt.IsZero()
 }
 
 // RefreshTokenStore tracks refresh tokens so they can be rotated, revoked and
 // checked for reuse.
 //
 // Used records must be kept until they expire: reuse detection works by
-// finding a record with Used set. If a used record is deleted early, a
+// finding a record whose UsedAt is set. If a used record is deleted early, a
 // replayed token is reported as [ErrTokenRevoked] and its family is not
 // revoked. Expired records may be purged at any time.
 //
@@ -122,12 +129,17 @@ type RefreshTokenRecord struct {
 type RefreshTokenStore interface {
 	// CreateRefreshToken saves a new, unused record.
 	CreateRefreshToken(ctx context.Context, rec RefreshTokenRecord) error
-	// ConsumeRefreshToken atomically marks the record used and returns it as
-	// it was *before* the call, so that two concurrent calls cannot both
-	// observe Used == false. It returns an error wrapping
+	// ConsumeRefreshToken atomically sets UsedAt to now if it is not already
+	// set, and returns the record as it was *before* the call, so that two
+	// concurrent calls cannot both observe an unused token. An existing UsedAt
+	// must not be overwritten. It returns an error wrapping
 	// [ErrRefreshTokenNotFound] if no record exists.
-	ConsumeRefreshToken(ctx context.Context, id uuid.UUID) (RefreshTokenRecord, error)
+	ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (RefreshTokenRecord, error)
 	// RevokeRefreshTokenFamily deletes every record in the family. Revoking
 	// an unknown family is not an error.
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
+	// RevokeRefreshTokensForSubject deletes every record belonging to
+	// subject, across all families. Revoking a subject with no records is
+	// not an error.
+	RevokeRefreshTokensForSubject(ctx context.Context, subject string) error
 }

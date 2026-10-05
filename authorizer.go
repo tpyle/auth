@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -243,10 +244,12 @@ func (a *Authorizer) VerifyAccessToken(ctx context.Context, token string) (*Clai
 	return a.parse(ctx, token, TokenTypeAccess, true)
 }
 
-// Refresh exchanges a refresh token for a new token pair. The presented
-// refresh token is consumed and cannot be used again: presenting it a second
-// time revokes its whole family and returns [ErrRefreshTokenReused]. Note that
-// a client sending two refresh requests concurrently will trigger this.
+// Refresh exchanges a refresh token for a new token pair in the same session
+// (family). The presented refresh token is consumed. Presenting it again
+// within [Config.RefreshReuseGrace] of its first use issues another pair, so
+// concurrent refreshes from several tabs or a retry after a lost response
+// still work. Presenting it later is treated as theft: the whole family is
+// revoked and [ErrRefreshTokenReused] is returned.
 //
 // A revoked or logged-out token returns [ErrTokenRevoked].
 func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (*TokenPair, error) {
@@ -271,21 +274,22 @@ func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (*TokenPa
 		return nil, err
 	}
 
-	rec, err := a.s.refreshStore.ConsumeRefreshToken(ctx, id)
+	now := a.s.now()
+	rec, err := a.s.refreshStore.ConsumeRefreshToken(ctx, id, now)
 	if errors.Is(err, ErrRefreshTokenNotFound) {
 		return nil, ErrTokenRevoked
 	}
 	if err != nil {
 		return nil, fmt.Errorf("auth: consuming refresh token: %w", err)
 	}
-	if rec.Used {
+	if rec.Subject != c.Subject || rec.FamilyID != family {
+		return nil, fmt.Errorf("%w: refresh token does not match its record", ErrInvalidToken)
+	}
+	if rec.Used() && !a.withinReuseGrace(now, rec.UsedAt) {
 		if err := a.s.refreshStore.RevokeRefreshTokenFamily(ctx, family); err != nil {
 			return nil, errors.Join(ErrRefreshTokenReused, fmt.Errorf("auth: revoking token family: %w", err))
 		}
 		return nil, ErrRefreshTokenReused
-	}
-	if rec.Subject != c.Subject || rec.FamilyID != family {
-		return nil, fmt.Errorf("%w: refresh token does not match its record", ErrInvalidToken)
 	}
 	return a.issuePair(ctx, c.Subject, extra, family)
 }
@@ -307,6 +311,35 @@ func (a *Authorizer) Logout(ctx context.Context, refreshToken string) error {
 	return nil
 }
 
+// withinReuseGrace reports whether a reuse at now of a token first used at
+// usedAt is tolerated. now may precede usedAt when concurrent requests (or
+// instances with skewed clocks) race, so with the grace period disabled any
+// reuse is rejected regardless of ordering.
+func (a *Authorizer) withinReuseGrace(now, usedAt time.Time) bool {
+	return a.s.RefreshReuseGrace > 0 && now.Sub(usedAt) <= a.s.RefreshReuseGrace
+}
+
+// RevokeAllSessions revokes every refresh token issued to subject, across all
+// sessions and devices. Use it after a password change or when disabling an
+// account; follow it with [Authorizer.IssueTokenPair] to keep the current
+// device signed in.
+//
+// Access tokens already issued stay valid until they expire. A refresh that
+// is in flight at the moment of revocation may still complete and issue a
+// new pair.
+func (a *Authorizer) RevokeAllSessions(ctx context.Context, subject string) error {
+	if err := a.s.requireRefreshStore(); err != nil {
+		return err
+	}
+	if subject == "" {
+		return errors.New("auth: subject must not be empty")
+	}
+	if err := a.s.refreshStore.RevokeRefreshTokensForSubject(ctx, subject); err != nil {
+		return fmt.Errorf("auth: revoking sessions: %w", err)
+	}
+	return nil
+}
+
 func (a *Authorizer) parseRefresh(ctx context.Context, token string, validateTimes bool) (*Claims, uuid.UUID, error) {
 	c, err := a.parse(ctx, token, TokenTypeRefresh, validateTimes)
 	if err != nil {
@@ -321,8 +354,11 @@ func (a *Authorizer) parseRefresh(ctx context.Context, token string, validateTim
 
 // JWKS returns the unexpired public keys from the [KeyStore] as a JSON Web
 // Key Set, newest first, so other services can verify tokens with any
-// standard JWT library. Verifiers that cache the set should refetch it when
-// they see an unknown "kid", since rotation introduces new keys.
+// standard JWT library. It includes keys that will start signing at the next
+// rotation, so verifiers that cache the set for less than
+// [Config.KeyRotationInterval] know every key before it is used. A newly
+// started instance signs immediately, though, so verifiers should also
+// refetch the set when they see an unknown "kid".
 func (a *Authorizer) JWKS(ctx context.Context) (*JWKSet, error) {
 	keys, err := a.s.keyStore.ListKeys(ctx)
 	if err != nil {

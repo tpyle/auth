@@ -69,10 +69,11 @@ Verification checks: the signature (ES256 only), that `kid` is a known and unexp
 
 Each successful `Refresh`:
 
-1. Verifies the refresh token (signature, expiry, `typ == "refresh"`, `fam`).
-2. Calls `ConsumeRefreshToken`, which atomically marks the record as used.
-3. Calls the `ClaimsProvider` again, so role changes show up at the next refresh.
-4. Issues a new access token and a new refresh token **in the same family**, with a fresh `RefreshTokenTTL`.
+1. Verifies the refresh token (signature, expiry, `typ`, issuer/audience, `fam`).
+2. Calls the `ClaimsProvider` again, so role changes show up at the next refresh. This runs before the token is consumed, so if the provider fails, the client can retry with the same token.
+3. Calls `ConsumeRefreshToken(ctx, id, now)`, which atomically sets the record's `UsedAt` if it was unset and returns the record as it was before.
+4. Checks the record's subject and family against the token, then applies [reuse detection](#reuse-detection) if the record was already used.
+5. Issues a new access token and a new refresh token **in the same family**, with a fresh `RefreshTokenTTL`.
 
 A session therefore lasts for as long as the client refreshes at least once every `RefreshTokenTTL`. The library sets no maximum session length.
 
@@ -82,18 +83,32 @@ A **family** is the chain of refresh tokens that descends from one `Login` (or `
 
 ### Reuse detection
 
-A refresh token is meant to be used exactly once. If a token whose record is already marked used is presented again (and it has not expired), `Refresh`:
+A refresh token is meant to be used once. When a token whose record already has `UsedAt` set (and which has not expired) is presented again, the outcome depends on `RefreshReuseGrace` (default 30s):
 
-1. Revokes the whole family with `RevokeRefreshTokenFamily`.
-2. Returns `ErrRefreshTokenReused`.
+| Time since the token's **first** use | Result |
+|---|---|
+| ≤ `RefreshReuseGrace` | Tolerated. A new pair is issued in the same family, exactly as for a first use. |
+| > `RefreshReuseGrace` | Reuse. The whole family is revoked with `RevokeRefreshTokenFamily`, and `Refresh` returns `ErrRefreshTokenReused`. |
 
-The reasoning: if both an attacker and the real client hold the same refresh token, whichever uses it second triggers revocation, which shuts out the attacker too. Both must then log in again.
+The reasoning: if both an attacker and the real client hold the same refresh token, whichever uses it second (after the grace window) triggers revocation, which shuts out the attacker too. Both must then log in again.
 
-**Caveat: concurrent refreshes look like reuse.** If a client sends two refresh requests with the same token at the same time (two browser tabs, a retry after a timeout, a race at app start), one succeeds and the other revokes the session. Clients should make sure only one refresh is in flight at a time and always save the newest refresh token.
+#### Grace period
 
-**Caveat: failures after consumption.** The `ClaimsProvider` is called before the token is consumed, so a provider failure leaves the token usable for a retry. But if `CreateRefreshToken` fails after consumption, the presented token is already spent, and a client that retries with it triggers reuse detection.
+The grace window handles legitimate clients that present the same token more than once in quick succession:
 
-Reuse detection depends on used records staying in the store until they expire. See [Storage](Storage.md#refreshtokenstore).
+- several browser tabs refreshing at the same moment,
+- two concurrent requests at app start,
+- a retry after the response to the first refresh was lost (a timeout, a dropped connection, or a failure after the token was consumed, such as `CreateRefreshToken` failing).
+
+Each of these gets a valid new pair instead of being logged out.
+
+The window is measured from the token's **first** use. `UsedAt` is set once and never overwritten, so repeated reuses do not extend the window. A token is accepted for at most `RefreshReuseGrace` after its first exchange, however often it is presented.
+
+**Security trade-off:** a stolen refresh token replayed inside the window is not detected. The attacker gets a working pair in the same family, and nothing is revoked. Keep the window short. Seconds are enough for the races above.
+
+**`RefreshReuseGrace = 0` is strict mode.** Any second use of a token is treated as theft, even if the two requests raced and the clocks on two instances make the second appear earlier than the first. In strict mode, concurrent refreshes and retries after a lost response **do** revoke the session. The same happens with a grace period if the second use comes after the window. Clients should then make sure only one refresh is in flight at a time and always save the newest refresh token.
+
+Reuse detection depends on used records staying in the store until they expire. If a used record is deleted early, a replayed token gets `ErrTokenRevoked` and its family is not revoked. See [Storage](Storage.md#refreshtokenstore).
 
 ## Logout
 
@@ -105,54 +120,76 @@ Reuse detection depends on used records staying in the store until they expire. 
 
 Logout does **not** invalidate access tokens already issued. They are stateless and stay valid until `exp`. That is why `AccessTokenTTL` should be short. If you need immediate revocation of access tokens, keep a denylist of `jti` values in your own middleware.
 
-The library has no "log out everywhere" operation. `RefreshTokenStore` has no revoke-by-subject method. To end every session for a user (for example after a password change), delete their records from your refresh token table directly (`DELETE FROM refresh_tokens WHERE subject = $1`).
+### Revoking all sessions
+
+`RevokeAllSessions(ctx, subject)` revokes every refresh token issued to a subject, across all sessions and devices. It calls `RefreshTokenStore.RevokeRefreshTokensForSubject`. Use it after a password change, or when you disable an account. To keep the current device signed in, issue it a new pair afterwards:
+
+```go
+if err := a.RevokeAllSessions(ctx, username); err != nil {
+	return err
+}
+pair, err := a.IssueTokenPair(ctx, username, nil) // new session for this device
+```
+
+- It returns `ErrNotConfigured` without a `RefreshTokenStore`, and an error for an empty subject. A subject with no sessions is not an error.
+- Access tokens already issued stay valid until they expire.
+- A refresh that is already in flight when you revoke may still complete and issue a new pair. If that is a concern (for example when disabling an account), also block the subject in your `ClaimsProvider` or `UserStore`, or check account status in your own middleware.
 
 ## Signing-key rotation
 
 ### Lifecycle
 
-1. **`New`** generates a P-256 key pair, saves the public half with `KeyStore.StoreKey`, and starts signing with it. It then deletes expired keys from the store.
-2. **Every `KeyRotationInterval`** (default 24h), a background goroutine generates a new key, saves its public half, then switches to it for signing. Because the key is saved before it is used, no token is ever signed by a key that other instances cannot look up.
-3. After each successful rotation, **expired keys are deleted** from the store and from the local cache.
+With rotation on, each instance holds two keys: the **current** key, which signs now, and the **next** key, which is already published and will sign after the next rotation.
+
+1. **`New`** generates the current key and stores its public half with `KeyStore.StoreKey`. If rotation is on, it also generates and stores the next key. Then it deletes expired keys from the store. If either store call fails, `New` fails.
+2. **Every `KeyRotationInterval`** (default 24h), a background goroutine **promotes** the pre-stored next key to current. No store call is needed for this, so a `KeyStore` outage at rotation time does not delay rotation.
+3. It then generates and stores a **new next key**. If that fails, the error is logged and the step is retried every minute until it succeeds.
+4. Then it **deletes expired keys** from the store and from its in-memory key set.
+
+If no next key exists at rotation time (because storing it kept failing), a key is generated and stored on the spot before switching. If that also fails, the old key keeps signing and the rotation is retried after 1 minute (or after `KeyRotationInterval`, if that is shorter). Every key is stored before it signs anything, so no token is ever signed by a key other instances cannot look up.
 
 Each key's `ExpiresAt` is set when the key is created:
 
 ```
-ExpiresAt = CreatedAt + KeyRotationInterval + max(AccessTokenTTL, RefreshTokenTTL) + 5 minutes
+ExpiresAt = activation time + KeyRotationInterval + max(AccessTokenTTL, RefreshTokenTTL) + 5 minutes
 ```
 
-A key signs for at most one rotation interval. The last token it signs can live for the longest token TTL. The 5-minute margin covers small delays in rotation. With the defaults, that is 24h + 168h + 5m = 192h5m.
+A key signs for at most one rotation interval after it is activated. The last token it signs can live for the longest token TTL. The 5-minute margin covers small delays in rotation. With the defaults, that is 24h + 168h + 5m = 192h5m after activation. A next key is created one interval before it activates, so it is kept one interval longer than a key created on the spot.
 
-- **The current signing key is never deleted** by cleanup, even if it has passed its `ExpiresAt`.
+- **The current and next keys are never deleted** by cleanup, even if they have passed their `ExpiresAt`.
 - **A key past its `ExpiresAt` is rejected** during verification even if it is still in the store, so cleanup timing does not affect correctness.
-- **If a rotation fails** (for example the `KeyStore` is down), the error is logged and the rotation is retried after 1 minute (or after `KeyRotationInterval`, if that is shorter). Until a retry succeeds, the old key keeps signing. Tokens it signs past its planned window may stop verifying shortly before their own `exp`, once the key's `ExpiresAt` passes.
-- **`KeyRotationInterval = 0`** turns rotation off. Keys get no `ExpiresAt`, are never cleaned up, and each restart adds one more key to the store.
+- **If rotation is delayed** (no next key and the store is down), the old key keeps signing. Tokens it signs past its planned window may stop verifying shortly before their own `exp`, once the key's `ExpiresAt` passes.
+- **`KeyRotationInterval = 0`** turns rotation off. There is no next key, keys get no `ExpiresAt`, they are never cleaned up, and each restart adds one more key to the store.
 - **`Close`** stops the rotation goroutine and waits for it to exit.
 
-Private keys exist only in memory. A restart always creates a new key, and tokens signed by the old process stay verifiable through the old public key in the store.
+Private keys exist only in memory. A restart always creates new keys, and tokens signed by the old process stay verifiable through the old public keys in the store. The old process's unused next key stays in the store until it expires.
 
-### Key cache
+### Key set cache
 
-To verify a token whose `kid` is not the instance's own current key, the `Authorizer` loads the key from the `KeyStore` with `GetKey` and caches it for `KeyCacheTTL` (default 5m). As a result:
+Each `Authorizer` keeps an in-memory copy of the whole key set from the `KeyStore`:
 
-- A key deleted from the store by hand keeps working on other instances for up to `KeyCacheTTL`.
-- `KeyCacheTTL = 0` turns caching off, so every verification of another instance's token calls `GetKey`.
-- Unknown `kid`s are not cached. Every token with an unknown `kid` calls `GetKey`.
+- It reloads the set with `ListKeys` every `KeyCacheTTL` (default 5m). The reload is triggered by the first verification after the copy goes stale. `KeyCacheTTL = 0` means the set is reloaded on every verification of another instance's token, at most once per second.
+- When a token names a `kid` the instance does not know, it reloads the set at once, **at most once per second**. A flood of tokens with random `kid`s costs at most one `ListKeys` call per second per instance, and the copy does not grow because unknown IDs are never stored.
+- A key deleted from the store by hand keeps working on an instance until its next reload (up to `KeyCacheTTL`).
+- **If the store is down,** keys the instance already knows keep verifying (a warning is logged). A token with an unknown `kid` fails with the store error, which is an internal error (500). That includes tokens arriving within the same second as a failed reload.
+- The instance's own current key never needs the store.
+
+Because other instances' next keys are already in the store, they are normally in this copy before they sign anything.
 
 ### Multiple instances
 
 Give every instance the **same `KeyStore`** (and the same `RefreshTokenStore`, and the same `Issuer`/`Audience`). Then:
 
-- Each instance has its own signing key, and they rotate independently.
-- Any instance verifies any other instance's tokens by loading the `kid` from the shared store.
+- Each instance has its own signing keys, and they rotate independently.
+- Any instance verifies any other instance's tokens through its copy of the shared key set.
 - Any instance may delete any expired key. `DeleteKeys` must ignore missing IDs because instances race on this.
-- The store holds about `instances × (1 + (KeyRotationInterval + max TTL + 5m) / KeyRotationInterval)` unexpired keys. With the defaults that is about 9 per instance, plus one per restart.
+- The store holds about `instances × (2 + (KeyRotationInterval + max TTL + 5m) / KeyRotationInterval)` unexpired keys. With the defaults that is about 10 per instance, plus two per restart.
 
 With the default private `MemoryKeyStore`, instances **cannot** verify each other's tokens.
 
 ## JWKS
 
-`Authorizer.JWKS(ctx)` returns every unexpired public key in the `KeyStore` (from all instances), newest first, as a JSON Web Key Set. `JWKSHandler()` serves it with `Cache-Control: public, max-age=300`. Mount it at `/.well-known/jwks.json`:
+`Authorizer.JWKS(ctx)` returns every unexpired public key in the `KeyStore` (from all instances), newest first, as a JSON Web Key Set. It reads the store directly on each call. The set includes the **next** keys that have not started signing yet, so a single freshly started instance publishes two keys. A verifier that caches the set for less than `KeyRotationInterval` therefore knows every key before it signs anything. The one exception is a freshly started instance's first key, which signs immediately. `JWKSHandler()` serves it with `Cache-Control: public, max-age=300`. Mount it at `/.well-known/jwks.json`:
 
 ```go
 mux.Handle("GET /.well-known/jwks.json", a.JWKSHandler())
@@ -172,6 +209,6 @@ mux.Handle("GET /.well-known/jwks.json", a.JWKSHandler())
 
 Services that verify tokens with their own JWT library should:
 
-- **Fetch the set again when they see an unknown `kid`** (with a rate limit). Rotation adds keys, and an instance starts signing with a new key as soon as it is stored. A verifier that only refreshes on a timer will reject valid tokens until its next fetch.
+- **Fetch the set again when they see an unknown `kid`** (with a rate limit). Rotated keys are published one interval before use, but a newly started (or restarted) instance signs with its first key right away. A verifier that only refreshes on a timer would reject that instance's tokens until its next fetch.
 - **Require the `at+jwt` header type** (RFC 9068; many JWT libraries can enforce it), or `typ == "access"` in the payload. Refresh tokens are signed by the same keys. A verifier that skips this check would accept a refresh token, which lives much longer, as an access token.
 - Allow only `alg: ES256`, and check `exp`, and `iss`/`aud` if you use them.

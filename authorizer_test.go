@@ -428,8 +428,9 @@ func TestRefresh(t *testing.T) {
 		defer mu.Unlock()
 		return map[string]any{"role": role}, nil
 	}
+	clock := newFakeClock()
 	store := NewMemoryRefreshTokenStore()
-	a := newRefreshAuthorizer(t, store, WithClaimsProvider(provider))
+	a := newRefreshAuthorizer(t, store, WithClaimsProvider(provider), WithClock(clock.Now))
 
 	first, err := a.IssueTokenPair(ctx, "bob", nil)
 	if err != nil {
@@ -454,8 +455,9 @@ func TestRefresh(t *testing.T) {
 		t.Fatal("refresh token was not rotated")
 	}
 
-	// Reusing the consumed token revokes the whole family, including the
-	// token that replaced it.
+	// Reusing the consumed token after the grace period revokes the whole
+	// family, including the token that replaced it.
+	clock.Advance(DefaultConfig().RefreshReuseGrace + time.Second)
 	if _, err := a.Refresh(ctx, first.RefreshToken); !errors.Is(err, ErrRefreshTokenReused) {
 		t.Fatalf("reuse: err = %v; want ErrRefreshTokenReused", err)
 	}
@@ -480,17 +482,14 @@ func TestRefreshFamiliesAreIndependent(t *testing.T) {
 	}
 }
 
-func TestRefreshConcurrentUseRevokes(t *testing.T) {
-	ctx := context.Background()
-	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore())
-	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
-
-	const n = 8
+// concurrentRefreshes refreshes token n times in parallel and returns how
+// many succeeded.
+func concurrentRefreshes(a *Authorizer, token string, n int) int {
 	errs := make(chan error, n)
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			_, err := a.Refresh(ctx, pair.RefreshToken)
+			_, err := a.Refresh(context.Background(), token)
 			errs <- err
 		})
 	}
@@ -502,8 +501,118 @@ func TestRefreshConcurrentUseRevokes(t *testing.T) {
 			succeeded++
 		}
 	}
-	if succeeded > 1 {
-		t.Errorf("%d concurrent refreshes succeeded; want at most 1", succeeded)
+	return succeeded
+}
+
+// Several tabs refreshing with the same token at once all succeed within the
+// grace period, and the session survives.
+func TestRefreshConcurrentWithinGrace(t *testing.T) {
+	ctx := context.Background()
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore())
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	if got := concurrentRefreshes(a, pair.RefreshToken, 8); got != 8 {
+		t.Errorf("%d of 8 concurrent refreshes succeeded; want all", got)
+	}
+}
+
+func TestRefreshConcurrentWithoutGrace(t *testing.T) {
+	ctx := context.Background()
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithRefreshReuseGrace(0))
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	if got := concurrentRefreshes(a, pair.RefreshToken, 8); got != 1 {
+		t.Errorf("%d concurrent refreshes succeeded; want exactly 1", got)
+	}
+}
+
+func TestRefreshReuseGrace(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now), WithRefreshReuseGrace(30*time.Second))
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+
+	first, err := a.Refresh(ctx, pair.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A retry inside the window, e.g. after a lost response, gets its own pair.
+	clock.Advance(30 * time.Second)
+	retry, err := a.Refresh(ctx, pair.RefreshToken)
+	if err != nil {
+		t.Fatalf("reuse at the end of the grace window: %v", err)
+	}
+	if retry.RefreshToken == first.RefreshToken {
+		t.Error("grace refresh returned the same refresh token")
+	}
+	// The window is measured from the first use, so it does not slide.
+	clock.Advance(time.Second)
+	if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, ErrRefreshTokenReused) {
+		t.Fatalf("reuse after grace: err = %v; want ErrRefreshTokenReused", err)
+	}
+	for _, p := range []*TokenPair{first, retry} {
+		if _, err := a.Refresh(ctx, p.RefreshToken); !errors.Is(err, ErrTokenRevoked) {
+			t.Errorf("sibling token after theft detection: err = %v; want ErrTokenRevoked", err)
+		}
+	}
+}
+
+// The reusing request may have read its clock before the first use was
+// recorded, so the reuse appears to precede the first use.
+func TestRefreshReuseClockOrdering(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		grace time.Duration
+		want  error
+	}{
+		{0, ErrRefreshTokenReused},
+		{30 * time.Second, nil},
+	} {
+		clock := newFakeClock()
+		a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now), WithRefreshReuseGrace(tt.grace))
+		pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+		clock.Advance(2 * time.Second)
+		if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(-time.Second) // still after the token's iat
+		if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, tt.want) || (tt.want == nil && err != nil) {
+			t.Errorf("grace %v: err = %v; want %v", tt.grace, err, tt.want)
+		}
+	}
+}
+
+func TestRevokeAllSessions(t *testing.T) {
+	ctx := context.Background()
+	store := &faultyRefreshStore{RefreshTokenStore: NewMemoryRefreshTokenStore()}
+	a := newRefreshAuthorizer(t, store)
+	phone, _ := a.IssueTokenPair(ctx, "bob", nil)
+	laptop, _ := a.IssueTokenPair(ctx, "bob", nil)
+	other, _ := a.IssueTokenPair(ctx, "carol", nil)
+
+	if err := a.RevokeAllSessions(ctx, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]*TokenPair{"phone": phone, "laptop": laptop} {
+		if _, err := a.Refresh(ctx, p.RefreshToken); !errors.Is(err, ErrTokenRevoked) {
+			t.Errorf("%s: err = %v; want ErrTokenRevoked", name, err)
+		}
+	}
+	if _, err := a.Refresh(ctx, other.RefreshToken); err != nil {
+		t.Errorf("another user's session was affected: %v", err)
+	}
+	// Access tokens are stateless and remain valid until they expire.
+	if _, err := a.VerifyAccessToken(ctx, phone.AccessToken); err != nil {
+		t.Errorf("access token: %v", err)
+	}
+
+	if err := a.RevokeAllSessions(ctx, ""); err == nil {
+		t.Error("empty subject accepted")
+	}
+	store.revokeErr = errTest
+	if err := a.RevokeAllSessions(ctx, "bob"); !errors.Is(err, errTest) {
+		t.Errorf("store failure: err = %v", err)
+	}
+	if err := newTestAuthorizer(t).RevokeAllSessions(ctx, "bob"); !errors.Is(err, ErrNotConfigured) {
+		t.Errorf("no store: err = %v", err)
 	}
 }
 
@@ -542,7 +651,7 @@ func TestRefreshErrors(t *testing.T) {
 
 	t.Run("revoke failure on reuse", func(t *testing.T) {
 		store := &faultyRefreshStore{RefreshTokenStore: NewMemoryRefreshTokenStore()}
-		a := newRefreshAuthorizer(t, store)
+		a := newRefreshAuthorizer(t, store, WithRefreshReuseGrace(0))
 		pair, _ := a.IssueTokenPair(ctx, "bob", nil)
 		if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
 			t.Fatal(err)
@@ -698,8 +807,12 @@ func TestJWKS(t *testing.T) {
 	if len(set.Keys) != 2 {
 		t.Fatalf("got %d keys; want 2", len(set.Keys))
 	}
-	if set.Keys[0].KeyID != a.keys.current.Load().id.String() {
-		t.Error("newest key is not listed first")
+	listed := map[string]bool{}
+	for _, k := range set.Keys {
+		listed[k.KeyID] = true
+	}
+	if !listed[a.keys.current.Load().id.String()] {
+		t.Error("current key is not listed")
 	}
 
 	// A third-party verifier can check our tokens using only the JWKS.

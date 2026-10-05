@@ -7,7 +7,7 @@ The library has no database code of its own. You supply persistence through thes
 | `UserStore` | `Authenticate`, `Login` | `WithUserStore` |
 | `PasswordHashUpdater` (optional, on the same value as `UserStore`) | Upgrading outdated hashes automatically | (detected on the `UserStore`) |
 | `KeyStore` | Verifying tokens across instances and restarts | `WithKeyStore` (default: in-memory) |
-| `RefreshTokenStore` | Refresh tokens, `Refresh`, `Logout` | `WithRefreshTokenStore` |
+| `RefreshTokenStore` | Refresh tokens, `Refresh`, `Logout`, `RevokeAllSessions` | `WithRefreshTokenStore` |
 
 `KeyStore` and `RefreshTokenStore` implementations **must be safe for concurrent use**. An `Authorizer` calls them from many request goroutines and from its background rotation goroutine. A `UserStore` is called concurrently too, so make it safe for concurrent use as well. Any `database/sql`-based implementation already is.
 
@@ -41,7 +41,6 @@ If your `UserStore` also implements this interface, then after a **successful** 
 ```go
 type KeyStore interface {
 	StoreKey(ctx context.Context, key *VerificationKey) error
-	GetKey(ctx context.Context, id uuid.UUID) (*VerificationKey, error)
 	ListKeys(ctx context.Context) ([]*VerificationKey, error)
 	DeleteKeys(ctx context.Context, ids []uuid.UUID) error
 }
@@ -56,9 +55,8 @@ type VerificationKey struct {
 
 Contract:
 
-- `StoreKey` saves a new key. It is called once in `New` and once per rotation. If it fails, `New` fails. If it fails during a rotation, the `Authorizer` keeps signing with the old key and tries again a minute later.
-- `GetKey` returns the key, or an error **wrapping `auth.ErrKeyNotFound`**. A missing key makes verification fail with `ErrInvalidToken` (the client's fault). Any other error is an internal failure. Do not return `(nil, nil)` or a key with a nil `PublicKey`. Both are treated as internal errors.
-- `ListKeys` returns **all** keys, including expired ones. It is used by expired-key cleanup and by `JWKS`.
+- `StoreKey` saves a new key. `New` calls it once, or twice with rotation on (the current key and the [next key](Tokens-and-Keys.md#lifecycle)). Each rotation cycle calls it once more, to store the following next key. If it fails during `New`, `New` fails. If it fails in the background, the error is logged and the call is retried a minute later.
+- `ListKeys` returns **all** keys, including expired ones. Each `Authorizer` uses it to load its in-memory copy of the key set: every `KeyCacheTTL`, and at most once per second when a token names an unknown `kid`. Cleanup and `JWKS` use it too. Its cost therefore does not depend on how many tokens you verify. If it fails, keys the instance already knows keep verifying, and tokens with unknown `kid`s get an internal error. Entries with a nil `PublicKey` are ignored.
 - `DeleteKeys` removes the given IDs. It **must ignore IDs that do not exist**, because several instances may clean up the same keys at the same time.
 - Only public keys are passed to the store. Private keys never leave the process.
 
@@ -80,8 +78,9 @@ Store `ExpiresAt` as `NULL` when it is the zero value (this happens when `KeyRot
 ```go
 type RefreshTokenStore interface {
 	CreateRefreshToken(ctx context.Context, rec RefreshTokenRecord) error
-	ConsumeRefreshToken(ctx context.Context, id uuid.UUID) (RefreshTokenRecord, error)
+	ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (RefreshTokenRecord, error)
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
+	RevokeRefreshTokensForSubject(ctx context.Context, subject string) error
 }
 
 type RefreshTokenRecord struct {
@@ -90,17 +89,23 @@ type RefreshTokenRecord struct {
 	Subject   string
 	IssuedAt  time.Time
 	ExpiresAt time.Time
-	Used      bool
+	UsedAt    time.Time // first use; zero = unused
 }
+
+func (r RefreshTokenRecord) Used() bool // !r.UsedAt.IsZero()
 ```
 
-A refresh token is a signed JWT. The record holds no secrets. It only tracks whether the token can still be used.
+A refresh token is a signed JWT. The record holds no secrets. It only tracks whether the token can still be used, and when it was first used.
 
 Contract:
 
-- `CreateRefreshToken` saves a new record with `Used == false`.
-- `ConsumeRefreshToken` must **atomically** mark the record as used and return the record **as it was before the call**. If two concurrent calls both see `Used == false`, one stolen token can be refreshed twice and reuse detection is bypassed. Use a row lock or a single conditional statement, never a separate read and then write. If the record does not exist, return an error **wrapping `auth.ErrRefreshTokenNotFound`**. `Refresh` turns that into `ErrTokenRevoked`.
+- `CreateRefreshToken` saves a new record with a zero `UsedAt`.
+- `ConsumeRefreshToken(ctx, id, now)` must **atomically** set `UsedAt = now` **only if it is unset**, and return the record **as it was before the call**:
+  - If the token was unused, the returned record has a zero `UsedAt`. Exactly one of any number of concurrent callers may get this result. If two callers both see an unused token, one stolen token can be refreshed twice and reuse detection is bypassed. Use a conditional `UPDATE` or a row lock, never a separate read and then write.
+  - If the token was already used, return the record with its existing `UsedAt`, and **never overwrite it**. The [reuse grace window](Tokens-and-Keys.md#grace-period) is measured from the first use, so overwriting it would let the window slide forward.
+  - If the record does not exist, return an error **wrapping `auth.ErrRefreshTokenNotFound`**. `Refresh` turns that into `ErrTokenRevoked`.
 - `RevokeRefreshTokenFamily` deletes every record with that `FamilyID`. An unknown family is not an error. `Logout` and reuse detection both call it.
+- `RevokeRefreshTokensForSubject` deletes every record for that subject, across all families. A subject with no records is not an error. `RevokeAllSessions` calls it.
 - Keep used records until they expire. Reuse detection works only while the spent record exists. If used records are deleted early, a replayed token gets `ErrTokenRevoked` and its family is **not** revoked.
 
 ### Purging expired records
@@ -137,179 +142,62 @@ CREATE TABLE refresh_tokens (
     subject    TEXT        NOT NULL,
     issued_at  TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
-    used       BOOLEAN     NOT NULL DEFAULT FALSE
+    used_at    TIMESTAMPTZ            -- NULL = unused
 );
-CREATE INDEX refresh_tokens_family_idx  ON refresh_tokens (family_id);
-CREATE INDEX refresh_tokens_expires_idx ON refresh_tokens (expires_at);
+CREATE INDEX ON refresh_tokens (family_id);   -- RevokeRefreshTokenFamily
+CREATE INDEX ON refresh_tokens (subject);     -- RevokeRefreshTokensForSubject
+CREATE INDEX ON refresh_tokens (expires_at);  -- purging
 ```
 
 ### Implementation
 
-This code uses only `database/sql`. Plug in any PostgreSQL driver (for example `github.com/jackc/pgx/v5/stdlib`). `uuid.UUID` implements `sql.Scanner` and `driver.Valuer`, so it maps straight onto `UUID` columns.
+A complete implementation of all four interfaces lives in [`examples/sqlstore/sqlstore.go`](../examples/sqlstore/sqlstore.go) (package `github.com/tpyle/auth/v2/examples/sqlstore`). One `sqlstore.Store` value implements `UserStore`, `PasswordHashUpdater`, `KeyStore` and `RefreshTokenStore` using only `database/sql`. Bring your own PostgreSQL driver, for example `github.com/jackc/pgx/v5/stdlib`. Copy it into your project and adapt it. `uuid.UUID` implements `sql.Scanner` and `driver.Valuer`, so it maps straight onto `UUID` columns.
+
+The part that matters most is the atomic consume. A conditional `UPDATE` claims the token only if `used_at IS NULL`. A concurrent caller blocks on the row lock, and PostgreSQL then re-checks the `WHERE` clause against the committed row, so exactly one caller wins. Everyone else falls back to a plain `SELECT`, which returns the already-used record (with its original `used_at`) or reports that it is missing:
 
 ```go
-package pgstore
-
-import (
-	"context"
-	"database/sql"
-	"errors"
-	"fmt"
-	"time"
-
-	"github.com/google/uuid"
-	"github.com/tpyle/auth/v2"
-)
-
-// Users implements auth.UserStore and auth.PasswordHashUpdater.
-type Users struct{ DB *sql.DB }
-
-func (s *Users) LookupPasswordHash(ctx context.Context, username string) (string, error) {
-	var hash string
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT password_hash FROM users WHERE username = $1`, username).Scan(&hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("%w: %s", auth.ErrUserNotFound, username)
-	}
-	return hash, err
-}
-
-func (s *Users) UpdatePasswordHash(ctx context.Context, username, encodedHash string) error {
-	_, err := s.DB.ExecContext(ctx,
-		`UPDATE users SET password_hash = $2 WHERE username = $1`, username, encodedHash)
-	return err
-}
-
-// Keys implements auth.KeyStore.
-type Keys struct{ DB *sql.DB }
-
-func (s *Keys) StoreKey(ctx context.Context, k *auth.VerificationKey) error {
-	der, err := k.MarshalPublicKey()
-	if err != nil {
-		return err
-	}
-	var expires sql.NullTime
-	if !k.ExpiresAt.IsZero() {
-		expires = sql.NullTime{Time: k.ExpiresAt, Valid: true}
-	}
-	_, err = s.DB.ExecContext(ctx,
-		`INSERT INTO signing_keys (id, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
-		k.ID, der, k.CreatedAt, expires)
-	return err
-}
-
-func (s *Keys) GetKey(ctx context.Context, id uuid.UUID) (*auth.VerificationKey, error) {
-	row := s.DB.QueryRowContext(ctx,
-		`SELECT id, public_key, created_at, expires_at FROM signing_keys WHERE id = $1`, id)
-	k, err := scanKey(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: %s", auth.ErrKeyNotFound, id)
-	}
-	return k, err
-}
-
-func (s *Keys) ListKeys(ctx context.Context) ([]*auth.VerificationKey, error) {
-	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, public_key, created_at, expires_at FROM signing_keys`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var keys []*auth.VerificationKey
-	for rows.Next() {
-		k, err := scanKey(rows)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, k)
-	}
-	return keys, rows.Err()
-}
-
-func (s *Keys) DeleteKeys(ctx context.Context, ids []uuid.UUID) error {
-	for _, id := range ids { // or: DELETE ... WHERE id = ANY($1) with your driver's array support
-		if _, err := s.DB.ExecContext(ctx, `DELETE FROM signing_keys WHERE id = $1`, id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func scanKey(row interface{ Scan(...any) error }) (*auth.VerificationKey, error) {
-	var (
-		k       auth.VerificationKey
-		der     []byte
-		expires sql.NullTime
-	)
-	if err := row.Scan(&k.ID, &der, &k.CreatedAt, &expires); err != nil {
-		return nil, err
-	}
-	pub, err := auth.ParsePublicKey(der)
-	if err != nil {
-		return nil, err
-	}
-	k.PublicKey = pub
-	if expires.Valid {
-		k.ExpiresAt = expires.Time
-	}
-	return &k, nil
-}
-
-// RefreshTokens implements auth.RefreshTokenStore.
-type RefreshTokens struct{ DB *sql.DB }
-
-func (s *RefreshTokens) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
-	_, err := s.DB.ExecContext(ctx,
-		`INSERT INTO refresh_tokens (id, family_id, subject, issued_at, expires_at, used)
-		 VALUES ($1, $2, $3, $4, $5, FALSE)`,
-		r.ID, r.FamilyID, r.Subject, r.IssuedAt, r.ExpiresAt)
-	return err
-}
-
-// ConsumeRefreshToken locks the row, sets used, and returns the previous
-// value of used in one statement. A concurrent caller blocks on the row lock
-// and then sees used = true.
-func (s *RefreshTokens) ConsumeRefreshToken(ctx context.Context, id uuid.UUID) (auth.RefreshTokenRecord, error) {
+func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (auth.RefreshTokenRecord, error) {
 	var r auth.RefreshTokenRecord
 	err := s.DB.QueryRowContext(ctx, `
-		UPDATE refresh_tokens t SET used = TRUE
-		FROM (SELECT id, used FROM refresh_tokens WHERE id = $1 FOR UPDATE) old
-		WHERE t.id = old.id
-		RETURNING t.id, t.family_id, t.subject, t.issued_at, t.expires_at, old.used`, id).
-		Scan(&r.ID, &r.FamilyID, &r.Subject, &r.IssuedAt, &r.ExpiresAt, &r.Used)
+		UPDATE refresh_tokens SET used_at = $2
+		WHERE id = $1 AND used_at IS NULL
+		RETURNING id, family_id, subject, issued_at, expires_at`, id, now,
+	).Scan(&r.ID, &r.FamilyID, &r.Subject, &r.IssuedAt, &r.ExpiresAt)
+	if err == nil {
+		return r, nil // was unused; UsedAt stays zero in the returned record
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return r, err
+	}
+
+	var usedAt sql.NullTime
+	err = s.DB.QueryRowContext(ctx, `
+		SELECT id, family_id, subject, issued_at, expires_at, used_at
+		FROM refresh_tokens WHERE id = $1`, id,
+	).Scan(&r.ID, &r.FamilyID, &r.Subject, &r.IssuedAt, &r.ExpiresAt, &usedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return auth.RefreshTokenRecord{}, fmt.Errorf("%w: %s", auth.ErrRefreshTokenNotFound, id)
+		return r, auth.ErrRefreshTokenNotFound
 	}
+	r.UsedAt = usedAt.Time
 	return r, err
-}
-
-func (s *RefreshTokens) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = $1`, familyID)
-	return err
-}
-
-// PurgeExpired deletes refresh token records that can no longer be used.
-// Run it periodically.
-func (s *RefreshTokens) PurgeExpired(ctx context.Context, now time.Time) (int64, error) {
-	res, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE expires_at < $1`, now)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }
 ```
 
-If you would rather not rely on the `UPDATE ... FROM (SELECT ... FOR UPDATE)` form, run `SELECT ... FOR UPDATE` and then `UPDATE ... SET used = TRUE` inside one transaction, and return the values from the `SELECT`.
+This relies on PostgreSQL's default `READ COMMITTED` isolation. Under `REPEATABLE READ` or `SERIALIZABLE`, the losing caller gets a serialization error instead, which `Refresh` reports as an internal error.
 
 Wiring:
 
 ```go
+store := &sqlstore.Store{DB: db}
 a, err := auth.New(ctx,
-	auth.WithUserStore(&pgstore.Users{DB: db}),
-	auth.WithKeyStore(&pgstore.Keys{DB: db}),
-	auth.WithRefreshTokenStore(&pgstore.RefreshTokens{DB: db}),
+	auth.WithUserStore(store),
+	auth.WithKeyStore(store),
+	auth.WithRefreshTokenStore(store),
 )
 ```
+
+The example also has `PurgeExpiredRefreshTokens(ctx, now)` for the periodic purge.
+
 
 ## In-memory implementations
 

@@ -54,12 +54,17 @@ func ExampleAuthorizer_Login() {
 	role, _ := claims.GetString("role")
 	fmt.Println(claims.Subject, role)
 
-	// Exchange the refresh token for a new pair; the old one is now spent.
-	if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
+	// Exchange the refresh token for a new pair, then log out, which ends
+	// the session for every token descended from this login.
+	next, err := a.Refresh(ctx, pair.RefreshToken)
+	if err != nil {
 		log.Fatal(err)
 	}
-	_, err = a.Refresh(ctx, pair.RefreshToken)
-	fmt.Println(errors.Is(err, auth.ErrRefreshTokenReused))
+	if err := a.Logout(ctx, next.RefreshToken); err != nil {
+		log.Fatal(err)
+	}
+	_, err = a.Refresh(ctx, next.RefreshToken)
+	fmt.Println(errors.Is(err, auth.ErrTokenRevoked))
 	// Output:
 	// rejected wrong password
 	// alice admin

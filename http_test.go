@@ -84,7 +84,7 @@ func TestAuthHandler(t *testing.T) {
 	tests := []struct {
 		name    string
 		token   string
-		getErr  error
+		listErr error
 		subject string
 	}{
 		{"valid", pair.AccessToken, nil, "bob"},
@@ -95,8 +95,8 @@ func TestAuthHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			keys.fail(&keys.getErr, tt.getErr)
-			defer keys.fail(&keys.getErr, nil)
+			keys.fail(&keys.listErr, tt.listErr)
+			defer keys.fail(&keys.listErr, nil)
 			next := &claimsRecorder{}
 			a.AuthHandler(next).ServeHTTP(httptest.NewRecorder(), request(tt.token))
 			if !next.called {
@@ -134,7 +134,7 @@ func TestRequireAuthHandler(t *testing.T) {
 	tests := []struct {
 		name      string
 		token     string
-		getErr    error
+		listErr   error
 		status    int
 		challenge string
 	}{
@@ -146,8 +146,8 @@ func TestRequireAuthHandler(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			keys.fail(&keys.getErr, tt.getErr)
-			defer keys.fail(&keys.getErr, nil)
+			keys.fail(&keys.listErr, tt.listErr)
+			defer keys.fail(&keys.listErr, nil)
 			next := &claimsRecorder{}
 			rec := httptest.NewRecorder()
 			a.RequireAuthHandler(next).ServeHTTP(rec, request(tt.token))
@@ -236,7 +236,7 @@ func TestJWKSHandler(t *testing.T) {
 		t.Errorf("status %d headers %v", rec.Code, rec.Header())
 	}
 	var set JWKSet
-	if err := json.Unmarshal(rec.Body.Bytes(), &set); err != nil || len(set.Keys) != 1 {
+	if err := json.Unmarshal(rec.Body.Bytes(), &set); err != nil || len(set.Keys) != 2 { // current and next
 		t.Errorf("body %q: %v", rec.Body.String(), err)
 	}
 

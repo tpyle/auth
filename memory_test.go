@@ -31,17 +31,17 @@ func TestMemoryKeyStore(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryKeyStore()
 	id := uuid.New()
-	if _, err := s.GetKey(ctx, id); !errors.Is(err, ErrKeyNotFound) {
-		t.Errorf("err = %v; want ErrKeyNotFound", err)
+	if storedKey(t, s, id) != nil {
+		t.Fatal("empty store returned a key")
 	}
 	k := &VerificationKey{ID: id, CreatedAt: time.Unix(1, 0)}
 	if err := s.StoreKey(ctx, k); err != nil {
 		t.Fatal(err)
 	}
 	k.CreatedAt = time.Unix(2, 0) // the store must hold its own copy
-	got, err := s.GetKey(ctx, id)
-	if err != nil || !got.CreatedAt.Equal(time.Unix(1, 0)) {
-		t.Errorf("GetKey = %+v, %v", got, err)
+	got := storedKey(t, s, id)
+	if got == nil || !got.CreatedAt.Equal(time.Unix(1, 0)) {
+		t.Errorf("stored key = %+v", got)
 	}
 	got.CreatedAt = time.Unix(3, 0)
 	list, _ := s.ListKeys(ctx)
@@ -72,15 +72,21 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 		}
 	}
 
-	first, err := s.ConsumeRefreshToken(ctx, a.ID)
-	if err != nil || first.Used || first.Subject != "bob" {
+	firstUse := clock.Now()
+	first, err := s.ConsumeRefreshToken(ctx, a.ID, firstUse)
+	if err != nil || first.Used() || first.Subject != "bob" {
 		t.Errorf("first consume = %+v, %v", first, err)
 	}
-	second, err := s.ConsumeRefreshToken(ctx, a.ID)
-	if err != nil || !second.Used {
-		t.Errorf("second consume = %+v, %v; want Used", second, err)
+	// A later consume reports the first use time and does not overwrite it.
+	second, err := s.ConsumeRefreshToken(ctx, a.ID, firstUse.Add(time.Minute))
+	if err != nil || !second.Used() || !second.UsedAt.Equal(firstUse) {
+		t.Errorf("second consume = %+v, %v; want UsedAt %v", second, err, firstUse)
 	}
-	if _, err := s.ConsumeRefreshToken(ctx, uuid.New()); !errors.Is(err, ErrRefreshTokenNotFound) {
+	third, _ := s.ConsumeRefreshToken(ctx, a.ID, firstUse.Add(2*time.Minute))
+	if !third.UsedAt.Equal(firstUse) {
+		t.Errorf("UsedAt overwritten: %v", third.UsedAt)
+	}
+	if _, err := s.ConsumeRefreshToken(ctx, uuid.New(), firstUse); !errors.Is(err, ErrRefreshTokenNotFound) {
 		t.Errorf("err = %v; want ErrRefreshTokenNotFound", err)
 	}
 
@@ -96,7 +102,7 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 	if err := s.RevokeRefreshTokenFamily(ctx, fam); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ConsumeRefreshToken(ctx, b.ID); !errors.Is(err, ErrRefreshTokenNotFound) {
+	if _, err := s.ConsumeRefreshToken(ctx, b.ID, clock.Now()); !errors.Is(err, ErrRefreshTokenNotFound) {
 		t.Errorf("revoked token still present: %v", err)
 	}
 	if s.Len() != 2 {
@@ -104,6 +110,20 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 	}
 	if err := s.RevokeRefreshTokenFamily(ctx, uuid.New()); err != nil {
 		t.Errorf("revoking unknown family: %v", err)
+	}
+
+	// c (eve) remains along with the unnamed record; revoke eve's.
+	if err := s.RevokeRefreshTokensForSubject(ctx, "eve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeRefreshToken(ctx, c.ID, clock.Now()); !errors.Is(err, ErrRefreshTokenNotFound) {
+		t.Errorf("eve's token survived subject revocation: %v", err)
+	}
+	if s.Len() != 1 {
+		t.Errorf("Len = %d after subject revoke; want 1", s.Len())
+	}
+	if err := s.RevokeRefreshTokensForSubject(ctx, "nobody"); err != nil {
+		t.Errorf("revoking unknown subject: %v", err)
 	}
 }
 
