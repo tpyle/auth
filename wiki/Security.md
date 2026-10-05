@@ -1,0 +1,76 @@
+# Security
+
+## Password hashing
+
+### Argon2id defaults
+
+`DefaultArgon2Params()` is the **second recommended option in RFC 9106 §4**:
+
+| Parameter | Value |
+|---|---|
+| Memory | 64 MiB (`MemoryKiB: 65536`) |
+| Iterations | 3 |
+| Parallelism | 4 lanes |
+| Salt | 16 random bytes |
+| Hash | 32 bytes |
+
+Hashes are stored as PHC strings, `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`, with unpadded standard base64. `VerifyPassword` reads the cost parameters **from the hash**, not from the config, and compares in constant time. Only Argon2id version 19 is accepted.
+
+If you raise the cost, measure first: one login should take a few hundred milliseconds at most on your hardware.
+
+### Memory sizing
+
+Each running hash allocates `MemoryKiB` of memory. `MaxConcurrentHashes` (default: number of CPUs ÷ 4 lanes, at least 1) caps how many run at once. Peak hashing memory is therefore:
+
+```
+MaxConcurrentHashes × MemoryKiB
+```
+
+With the defaults on an 8-core machine, that is 2 × 64 MiB = 128 MiB. Set `MaxConcurrentHashes` so this fits within your container's memory limit, with room left for everything else. Requests beyond the cap wait for a slot (and give up when their `ctx` is cancelled), so a flood of login requests causes queueing instead of running out of memory. Each hash uses `Parallelism` threads, so the default cap keeps the CPU fully used without oversubscribing it.
+
+`MaxConcurrentHashes` applies to `Authorizer.HashPassword`, `Authenticate` and `Login`. The package-level `HashPassword`/`VerifyPassword` functions ignore it.
+
+### Automatic rehash
+
+When you change `Argon2` parameters, existing hashes keep working because each hash records its own parameters. If your `UserStore` implements `PasswordHashUpdater`, every successful login with an outdated hash re-hashes the password with the current parameters and saves the result. To find hashes that still need upgrading, call `NeedsRehash(hash, params)`.
+
+### Unknown users
+
+If `LookupPasswordHash` returns `ErrUserNotFound`, `Authenticate` still runs a full Argon2 verification against a dummy hash made with the current parameters. Then it returns the same `ErrInvalidCredentials` as for a wrong password. Response time and error therefore do not reveal whether a username exists. Two limits remain:
+
+- The dummy hash is created on the first unknown-user login, so that one request takes about twice as long.
+- Users whose stored hash still uses older, different parameters take a different time to verify than the dummy, until their hash is upgraded.
+
+## Tokens
+
+- **ES256 only.** Tokens are signed with ECDSA P-256 / SHA-256. The parser accepts only `ES256`, which blocks `alg: none` and algorithm-confusion attacks.
+- **Private keys never leave the process.** They are generated in memory, never written to disk or to any store, and die with the process. Only public keys go to the `KeyStore`. A leaked key database therefore cannot be used to forge tokens. Its integrity still matters, though: anyone who can **write** to the key table can insert their own public key and forge tokens with it. Restrict write access to it.
+- **Key rotation** (default every 24h) limits how long a key is in use. See [Tokens and Keys](Tokens-and-Keys.md#signing-key-rotation).
+- **Access and refresh tokens cannot be swapped.** The `typ` claim is checked on every verification.
+- **Refresh-token reuse detection** revokes a session when a stolen refresh token is used after (or before) the real client uses it.
+
+### Issuer and audience
+
+Set `Issuer` and `Audience` whenever more than one service or environment might see your tokens:
+
+```go
+auth.WithIssuer("https://auth.example.com"),
+auth.WithAudience("https://api.example.com"),
+```
+
+With these set, tokens must carry a matching `iss` and an `aud` that includes one of the configured values. A token minted for staging, or for another service that shares a key store, is then rejected. Without them, any token signed by a known key is accepted.
+
+## Recommendations
+
+- **Serve everything over HTTPS.** Passwords and Bearer tokens are sent as-is.
+- **Keep `AccessTokenTTL` short** (the default 15 minutes is reasonable). Access tokens cannot be revoked. Logout only stops refreshes.
+- **Cookies:** if you use `WithAuthCookie`, set `HttpOnly` (blocks theft through XSS), `Secure`, and `SameSite=Lax` or `Strict`. Cookie authentication is exposed to CSRF. Use `SameSite`, CSRF tokens, or check `Origin` on requests that change state. Do not use cookies to authenticate cross-site requests.
+- **Rate-limit logins yourself.** The library does not rate-limit or lock accounts. Limit attempts per account and per IP in front of your login handler. `MaxConcurrentHashes` only protects memory, not passwords.
+- **Refresh tokens on clients:**
+  - Browsers: an `HttpOnly`, `Secure`, `SameSite=Strict` cookie scoped to the refresh/logout path. Never `localStorage`.
+  - Mobile/desktop: the platform keystore (iOS Keychain, Android Keystore).
+  - Always replace the stored refresh token with the new one from each refresh, and allow only one refresh in flight at a time. See [reuse detection](Tokens-and-Keys.md#reuse-detection).
+- **Treat `ErrRefreshTokenReused` as a security signal.** Log it with the subject and alert on spikes.
+- **Ending all sessions after a password change** has to be done in your own store (delete the user's refresh token records). See [Tokens and Keys](Tokens-and-Keys.md#logout).
+- **External verifiers** must check the `at+jwt` header type (or `typ == "access"` in the payload). See [JWKS](Tokens-and-Keys.md#jwks).
+- **Don't log tokens** or password inputs. Errors from this package never contain them.
