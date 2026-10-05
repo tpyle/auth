@@ -70,6 +70,7 @@ type faultyKeyStore struct {
 	mu                           sync.Mutex
 	storeErr, listErr, deleteErr error
 	listCalls                    atomic.Int32
+	extra                        []*VerificationKey // appended to ListKeys results
 }
 
 func newFaultyKeyStore() *faultyKeyStore {
@@ -100,7 +101,10 @@ func (f *faultyKeyStore) ListKeys(ctx context.Context) ([]*VerificationKey, erro
 	if err := f.err(&f.listErr); err != nil {
 		return nil, err
 	}
-	return f.KeyStore.ListKeys(ctx)
+	keys, err := f.KeyStore.ListKeys(ctx)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append(keys, f.extra...), err
 }
 
 func (f *faultyKeyStore) DeleteKeys(ctx context.Context, ids []uuid.UUID) error {
@@ -114,9 +118,13 @@ func (f *faultyKeyStore) DeleteKeys(ctx context.Context, ids []uuid.UUID) error 
 type faultyRefreshStore struct {
 	RefreshTokenStore
 	createErr, consumeErr, revokeErr error
+	beforeCreate                     func() // runs at the start of CreateRefreshToken
 }
 
 func (f *faultyRefreshStore) CreateRefreshToken(ctx context.Context, rec RefreshTokenRecord) error {
+	if f.beforeCreate != nil {
+		f.beforeCreate()
+	}
 	if f.createErr != nil {
 		return f.createErr
 	}

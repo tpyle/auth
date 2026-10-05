@@ -17,9 +17,20 @@
 //	    expires_at TIMESTAMPTZ          -- NULL = never
 //	);
 //
+//	-- One row per login session. Revoked rows are kept until expires_at so
+//	-- an in-flight refresh cannot add a token to a revoked session.
+//	CREATE TABLE refresh_families (
+//	    id         UUID PRIMARY KEY,
+//	    subject    TEXT NOT NULL,
+//	    revoked    BOOLEAN NOT NULL DEFAULT FALSE,
+//	    expires_at TIMESTAMPTZ NOT NULL -- latest expiry of any token in it
+//	);
+//	CREATE INDEX ON refresh_families (subject);
+//	CREATE INDEX ON refresh_families (expires_at);
+//
 //	CREATE TABLE refresh_tokens (
 //	    id         UUID PRIMARY KEY,
-//	    family_id  UUID NOT NULL,
+//	    family_id  UUID NOT NULL REFERENCES refresh_families ON DELETE CASCADE,
 //	    subject    TEXT NOT NULL,
 //	    issued_at  TIMESTAMPTZ NOT NULL,
 //	    expires_at TIMESTAMPTZ NOT NULL,
@@ -28,6 +39,9 @@
 //	CREATE INDEX ON refresh_tokens (family_id);
 //	CREATE INDEX ON refresh_tokens (subject);
 //	CREATE INDEX ON refresh_tokens (expires_at);
+//
+// The refresh-token methods rely on PostgreSQL's default READ COMMITTED
+// isolation level.
 package sqlstore
 
 import (
@@ -111,11 +125,30 @@ func (s *Store) DeleteKeys(ctx context.Context, ids []uuid.UUID) error {
 }
 
 // CreateRefreshToken implements auth.RefreshTokenStore.
+//
+// The upsert locks the family row for the rest of the transaction. Revocation
+// updates the same row, so the two serialize: either revocation commits first
+// and this sees revoked = TRUE, or this commits first and revocation's DELETE
+// (a later statement, with a fresh snapshot) removes the new token.
 func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
-	_, err := s.DB.ExecContext(ctx,
-		`INSERT INTO refresh_tokens (id, family_id, subject, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
-		r.ID, r.FamilyID, r.Subject, r.IssuedAt, r.ExpiresAt)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		var revoked bool
+		err := tx.QueryRowContext(ctx, `
+			INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)
+			ON CONFLICT (id) DO UPDATE
+				SET expires_at = GREATEST(refresh_families.expires_at, EXCLUDED.expires_at)
+			RETURNING revoked`, r.FamilyID, r.Subject, r.ExpiresAt).Scan(&revoked)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, r.FamilyID)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO refresh_tokens (id, family_id, subject, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+			r.ID, r.FamilyID, r.Subject, r.IssuedAt, r.ExpiresAt)
+		return err
+	})
 }
 
 // ConsumeRefreshToken implements auth.RefreshTokenStore.
@@ -152,24 +185,56 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.
 
 // RevokeRefreshTokenFamily implements auth.RefreshTokenStore.
 func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = $1`, familyID)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE refresh_families SET revoked = TRUE WHERE id = $1`, familyID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = $1`, familyID)
+		return err
+	})
 }
 
 // RevokeRefreshTokensForSubject implements auth.RefreshTokenStore.
 func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject string) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE subject = $1`, subject)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE refresh_families SET revoked = TRUE WHERE subject = $1`, subject); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE subject = $1`, subject)
+		return err
+	})
 }
 
-// PurgeExpiredRefreshTokens deletes expired records. Run it periodically
-// (for example hourly); the auth package never deletes expired records itself.
+// PurgeExpiredRefreshTokens deletes expired families (with their tokens)
+// and expired tokens. Run it periodically (for example hourly); the auth
+// package never deletes expired records itself.
 func (s *Store) PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error) {
-	res, err := s.DB.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE expires_at < $1`, now)
-	if err != nil {
-		return 0, err
+	var total int64
+	for _, q := range []string{
+		`DELETE FROM refresh_families WHERE expires_at < $1`,
+		`DELETE FROM refresh_tokens WHERE expires_at < $1`,
+	} {
+		res, err := s.DB.ExecContext(ctx, q, now)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
 	}
-	return res.RowsAffected()
+	return total, nil
+}
+
+// inTx runs fn in a transaction, committing if it returns nil.
+func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 type scanner interface{ Scan(dest ...any) error }

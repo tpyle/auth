@@ -125,9 +125,20 @@ func (r RefreshTokenRecord) Used() bool {
 // replayed token is reported as [ErrTokenRevoked] and its family is not
 // revoked. Expired records may be purged at any time.
 //
+// Revocation applies to the family, not just its current records: a refresh
+// can be in flight (its old token consumed, its replacement not yet created)
+// at the moment a family is revoked, and the replacement must not survive.
+// Stores therefore remember revoked families, and creating a token in a
+// revoked family fails. The check in CreateRefreshToken and the marking in
+// the revoke methods must be atomic with respect to each other: a token
+// created concurrently with a revocation is either rejected or deleted by
+// it. A revoked family may be forgotten once all of its tokens have expired.
+//
 // Implementations must be safe for concurrent use.
 type RefreshTokenStore interface {
-	// CreateRefreshToken saves a new, unused record.
+	// CreateRefreshToken saves a new, unused record. The first record of a
+	// family (from a login) creates the family. It must return an error
+	// wrapping [ErrTokenRevoked] if rec.FamilyID has been revoked.
 	CreateRefreshToken(ctx context.Context, rec RefreshTokenRecord) error
 	// ConsumeRefreshToken atomically sets UsedAt to now if it is not already
 	// set, and returns the record as it was *before* the call, so that two
@@ -135,11 +146,11 @@ type RefreshTokenStore interface {
 	// must not be overwritten. It returns an error wrapping
 	// [ErrRefreshTokenNotFound] if no record exists.
 	ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (RefreshTokenRecord, error)
-	// RevokeRefreshTokenFamily deletes every record in the family. Revoking
-	// an unknown family is not an error.
+	// RevokeRefreshTokenFamily marks the family revoked and deletes its
+	// records. Revoking an unknown family is not an error.
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
-	// RevokeRefreshTokensForSubject deletes every record belonging to
-	// subject, across all families. Revoking a subject with no records is
-	// not an error.
+	// RevokeRefreshTokensForSubject revokes, as RevokeRefreshTokenFamily
+	// does, every family belonging to subject. Revoking a subject with no
+	// families is not an error.
 	RevokeRefreshTokensForSubject(ctx context.Context, subject string) error
 }

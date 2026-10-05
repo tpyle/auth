@@ -126,8 +126,11 @@ func headerType(typ TokenType) string {
 	return headerTypeRefresh
 }
 
-func (a *Authorizer) sign(typ TokenType, mc jwt.MapClaims) (string, error) {
-	k := a.keys.current.Load()
+func (a *Authorizer) sign(ctx context.Context, typ TokenType, mc jwt.MapClaims) (string, error) {
+	k, err := a.keys.signer(ctx)
+	if err != nil {
+		return "", err
+	}
 	t := jwt.NewWithClaims(jwt.SigningMethodES256, mc)
 	t.Header["kid"] = k.id.String()
 	t.Header["typ"] = headerType(typ)
@@ -138,7 +141,7 @@ func (a *Authorizer) sign(typ TokenType, mc jwt.MapClaims) (string, error) {
 	return s, nil
 }
 
-func (a *Authorizer) issueAccess(subject string, extra map[string]any) (string, time.Time, error) {
+func (a *Authorizer) issueAccess(ctx context.Context, subject string, extra map[string]any) (string, time.Time, error) {
 	if subject == "" {
 		return "", time.Time{}, errors.New("auth: subject must not be empty")
 	}
@@ -151,7 +154,7 @@ func (a *Authorizer) issueAccess(subject string, extra map[string]any) (string, 
 	for k, v := range extra {
 		mc[k] = v
 	}
-	tok, err := a.sign(TokenTypeAccess, mc)
+	tok, err := a.sign(ctx, TokenTypeAccess, mc)
 	return tok, exp, err
 }
 
@@ -171,7 +174,7 @@ func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family uu
 	}
 	mc := a.baseClaims(subject, TokenTypeRefresh, rec.ID, now, exp)
 	mc[claimFamily] = family.String()
-	tok, err := a.sign(TokenTypeRefresh, mc)
+	tok, err := a.sign(ctx, TokenTypeRefresh, mc)
 	return tok, exp, err
 }
 
@@ -181,7 +184,7 @@ func (a *Authorizer) issuePair(ctx context.Context, subject string, extra map[st
 	if err := a.checkOpen(); err != nil {
 		return nil, err
 	}
-	access, accessExp, err := a.issueAccess(subject, extra)
+	access, accessExp, err := a.issueAccess(ctx, subject, extra)
 	if err != nil {
 		return nil, err
 	}

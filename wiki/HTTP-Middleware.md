@@ -64,7 +64,7 @@ auth.WithUnauthorizedHandler(func(w http.ResponseWriter, r *http.Request, err er
 
 ## JWKSHandler
 
-`a.JWKSHandler()` serves the public keys as a JWK Set with `Cache-Control: public, max-age=300`. If `ListKeys` fails, it returns a plain-text 500. See [Tokens and Keys](Tokens-and-Keys.md#jwks).
+`a.JWKSHandler()` serves the public keys as a JWK Set with `Cache-Control: public, max-age=N`, where N is min(5 minutes, `KeyRotationInterval`/2), or 5 minutes when rotation is off. Malformed stored keys are skipped. If `ListKeys` fails, it returns a plain-text 500. See [Tokens and Keys](Tokens-and-Keys.md#jwks).
 
 ## Full example
 

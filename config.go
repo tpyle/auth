@@ -29,11 +29,11 @@ type Config struct {
 	// Callers beyond the cap wait (respecting context cancellation).
 	MaxConcurrentHashes int `mapstructure:"max_concurrent_hashes"`
 
-	// AccessTokenTTL is how long access tokens are valid.
+	// AccessTokenTTL is how long access tokens are valid. Must be at least 1s.
 	AccessTokenTTL time.Duration `mapstructure:"access_token_ttl"`
 	// RefreshTokenTTL is how long each refresh token is valid. Refreshing
 	// issues a new refresh token, so a session stays alive as long as it is
-	// refreshed at least this often.
+	// refreshed at least this often. Must be at least 1s.
 	RefreshTokenTTL time.Duration `mapstructure:"refresh_token_ttl"`
 
 	// RefreshReuseGrace is how long after a refresh token's first use it may
@@ -97,11 +97,13 @@ func (c Config) Validate() error {
 	if c.MaxConcurrentHashes < 1 {
 		errs = append(errs, errors.New("auth: MaxConcurrentHashes must be at least 1"))
 	}
-	if c.AccessTokenTTL <= 0 {
-		errs = append(errs, errors.New("auth: AccessTokenTTL must be positive"))
+	// Token timestamps have one-second resolution, so shorter lifetimes
+	// would produce tokens that are already expired.
+	if c.AccessTokenTTL < time.Second {
+		errs = append(errs, errors.New("auth: AccessTokenTTL must be at least 1s"))
 	}
-	if c.RefreshTokenTTL <= 0 {
-		errs = append(errs, errors.New("auth: RefreshTokenTTL must be positive"))
+	if c.RefreshTokenTTL < time.Second {
+		errs = append(errs, errors.New("auth: RefreshTokenTTL must be at least 1s"))
 	}
 	if c.RefreshReuseGrace < 0 {
 		errs = append(errs, errors.New("auth: RefreshReuseGrace must not be negative"))

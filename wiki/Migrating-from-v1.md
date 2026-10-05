@@ -43,8 +43,8 @@ v2 is a redesign. The API is not source-compatible, and **all tokens issued by v
 | `WithGetSigningKeysFunc` | `KeyStore.ListKeys` |
 | `WithDeleteExpiredSigningKeyFunc`, `WithDeleteExpiredSigningKeysFunc` | `KeyStore.DeleteKeys` |
 | `WithLookupRefreshTokenFunc` | `RefreshTokenStore.ConsumeRefreshToken(ctx, id, now)` (atomically sets `UsedAt` if unset and returns the previous record) |
-| `WithStoreRefreshTokenFunc` | `RefreshTokenStore.CreateRefreshToken` |
-| `WithDeleteRefreshTokenFunc` | `RefreshTokenStore.RevokeRefreshTokenFamily` |
+| `WithStoreRefreshTokenFunc` | `RefreshTokenStore.CreateRefreshToken` (also creates the family, and must fail with `ErrTokenRevoked` for a revoked family) |
+| `WithDeleteRefreshTokenFunc` | `RefreshTokenStore.RevokeRefreshTokenFamily` (marks the family revoked and deletes its tokens) |
 | (none) | `RefreshTokenStore.RevokeRefreshTokensForSubject`, used by the new `Authorizer.RevokeAllSessions` |
 
 Pass them with `WithKeyStore(...)` and `WithRefreshTokenStore(...)`.
@@ -141,4 +141,4 @@ Every v1 access token and refresh token is rejected after the upgrade. They have
 
 ### Refresh-token storage: new schema
 
-The v1 refresh table (`id`, `rand`, `subject`) cannot be migrated: v2 records hold no `Rand` secret, and add `FamilyID`, `IssuedAt`, `ExpiresAt` and `UsedAt` (a nullable `used_at` timestamp). v2 also needs indexes on `family_id`, `subject` and `expires_at`. Drop the old table and create the one in [Storage](Storage.md#postgresql). Likewise, replace the v1 signing-key table: v2 needs an `expires_at` column, and v1's stored keys are useless because their IDs never matched any token.
+The v1 refresh table (`id`, `rand`, `subject`) cannot be migrated: v2 records hold no `Rand` secret, and add `FamilyID`, `IssuedAt`, `ExpiresAt` and `UsedAt` (a nullable `used_at` timestamp). v2 also needs indexes on `family_id`, `subject` and `expires_at`. It also needs a new `refresh_families` table (`id`, `subject`, `revoked`, `expires_at`), which `refresh_tokens.family_id` references with `ON DELETE CASCADE`. Stores must remember revoked families so that a refresh racing a logout cannot survive it. Drop the old table and create both tables from [Storage](Storage.md#postgresql). Likewise, replace the v1 signing-key table: v2 needs an `expires_at` column, and v1's stored keys are useless because their IDs never matched any token.

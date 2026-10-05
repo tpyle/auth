@@ -16,16 +16,18 @@ func TestDefaultConfigIsValid(t *testing.T) {
 
 func TestConfigValidate(t *testing.T) {
 	tests := map[string]func(*Config){
-		"argon2":         func(c *Config) { c.Argon2.Iterations = 0 },
-		"max hashes":     func(c *Config) { c.MaxConcurrentHashes = 0 },
-		"access ttl":     func(c *Config) { c.AccessTokenTTL = 0 },
-		"refresh ttl":    func(c *Config) { c.RefreshTokenTTL = -time.Second },
-		"reuse grace":    func(c *Config) { c.RefreshReuseGrace = -time.Second },
-		"rotation":       func(c *Config) { c.KeyRotationInterval = -time.Second },
-		"key cache ttl":  func(c *Config) { c.KeyCacheTTL = -time.Second },
-		"leeway":         func(c *Config) { c.Leeway = -time.Second },
-		"rotation zero":  nil, // valid: disables rotation
-		"cache ttl zero": nil, // valid: disables caching
+		"argon2":                func(c *Config) { c.Argon2.Iterations = 0 },
+		"max hashes":            func(c *Config) { c.MaxConcurrentHashes = 0 },
+		"access ttl":            func(c *Config) { c.AccessTokenTTL = 0 },
+		"refresh ttl":           func(c *Config) { c.RefreshTokenTTL = -time.Second },
+		"subsecond access ttl":  func(c *Config) { c.AccessTokenTTL = 999 * time.Millisecond },
+		"subsecond refresh ttl": func(c *Config) { c.RefreshTokenTTL = 999 * time.Millisecond },
+		"reuse grace":           func(c *Config) { c.RefreshReuseGrace = -time.Second },
+		"rotation":              func(c *Config) { c.KeyRotationInterval = -time.Second },
+		"key cache ttl":         func(c *Config) { c.KeyCacheTTL = -time.Second },
+		"leeway":                func(c *Config) { c.Leeway = -time.Second },
+		"rotation zero":         nil, // valid: disables rotation
+		"cache ttl zero":        nil, // valid: disables caching
 	}
 	for name, modify := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -97,63 +97,129 @@ func (r RefreshTokenRecord) Used() bool // !r.UsedAt.IsZero()
 
 A refresh token is a signed JWT. The record holds no secrets. It only tracks whether the token can still be used, and when it was first used.
 
+Besides individual records, a store must remember **families** (one per login session) and whether each has been revoked. Deleting a family's records is not enough. A refresh can be in flight at the moment a family is revoked: its old token is already consumed, but its replacement is not yet created. That replacement must not survive the revocation.
+
 Contract:
 
 - `CreateRefreshToken` saves a new record with a zero `UsedAt`.
+  - The first record of a family (from `Login` or `IssueTokenPair`) creates the family.
+  - If `rec.FamilyID` has been revoked, it must return an error **wrapping `auth.ErrTokenRevoked`** and save nothing.
+  - This check and the revoke methods' marking must be **atomic with respect to each other**. A token created at the same time as a revocation must be either rejected or deleted by that revocation. In SQL, lock the family row in both operations (see below).
 - `ConsumeRefreshToken(ctx, id, now)` must **atomically** set `UsedAt = now` **only if it is unset**, and return the record **as it was before the call**:
   - If the token was unused, the returned record has a zero `UsedAt`. Exactly one of any number of concurrent callers may get this result. If two callers both see an unused token, one stolen token can be refreshed twice and reuse detection is bypassed. Use a conditional `UPDATE` or a row lock, never a separate read and then write.
   - If the token was already used, return the record with its existing `UsedAt`, and **never overwrite it**. The [reuse grace window](Tokens-and-Keys.md#grace-period) is measured from the first use, so overwriting it would let the window slide forward.
   - If the record does not exist, return an error **wrapping `auth.ErrRefreshTokenNotFound`**. `Refresh` turns that into `ErrTokenRevoked`.
-- `RevokeRefreshTokenFamily` deletes every record with that `FamilyID`. An unknown family is not an error. `Logout` and reuse detection both call it.
-- `RevokeRefreshTokensForSubject` deletes every record for that subject, across all families. A subject with no records is not an error. `RevokeAllSessions` calls it.
+- `RevokeRefreshTokenFamily` **marks the family revoked** and deletes its records. An unknown family is not an error. `Logout` and reuse detection both call it.
+- `RevokeRefreshTokensForSubject` revokes every family of that subject in the same way. A subject with no families is not an error. `RevokeAllSessions` calls it.
 - Keep used records until they expire. Reuse detection works only while the spent record exists. If used records are deleted early, a replayed token gets `ErrTokenRevoked` and its family is **not** revoked.
+- Keep revoked families until all of their tokens have expired. After that they can be forgotten.
 
 ### Purging expired records
 
-The library never deletes a record just because it expired. Logout and reuse detection delete whole families, but a session that is simply abandoned leaves its last record (and any used ones) in the table for good. Delete records whose `expires_at` has passed on a schedule, for example hourly:
+The library never deletes a record or a family just because it expired. Logout and reuse detection delete a family's records, but the family row stays (marked revoked). A session that is simply abandoned leaves its last record, any used ones, and its family in the store for good. Purge expired families and records on a schedule, for example hourly. With the schema below:
 
 ```sql
-DELETE FROM refresh_tokens WHERE expires_at < now();
+DELETE FROM refresh_families WHERE expires_at < now();  -- cascades to their tokens
+DELETE FROM refresh_tokens   WHERE expires_at < now();
 ```
 
-This is safe. An expired refresh token is rejected by its `exp` claim before the store is consulted, so its record is no longer needed. `MemoryRefreshTokenStore` purges on every `CreateRefreshToken`.
+This is safe. An expired refresh token is rejected by its `exp` claim before the store is consulted, so its record is no longer needed. A family's `expires_at` is the latest expiry of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. `MemoryRefreshTokenStore` purges expired records and families on every `CreateRefreshToken`.
 
 ## PostgreSQL
 
 ### Schema
 
+This is the schema from [`examples/sqlstore/sqlstore.go`](../examples/sqlstore/sqlstore.go):
+
 ```sql
 CREATE TABLE users (
     username      TEXT PRIMARY KEY,
     password_hash TEXT NOT NULL
-    -- ... your other columns
 );
 
 CREATE TABLE signing_keys (
     id         UUID PRIMARY KEY,
-    public_key BYTEA       NOT NULL,  -- PKIX DER from MarshalPublicKey
+    public_key BYTEA NOT NULL,      -- PKIX DER
     created_at TIMESTAMPTZ NOT NULL,
-    expires_at TIMESTAMPTZ            -- NULL = never expires
+    expires_at TIMESTAMPTZ          -- NULL = never
 );
+
+-- One row per login session. Revoked rows are kept until expires_at so
+-- an in-flight refresh cannot add a token to a revoked session.
+CREATE TABLE refresh_families (
+    id         UUID PRIMARY KEY,
+    subject    TEXT NOT NULL,
+    revoked    BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at TIMESTAMPTZ NOT NULL -- latest expiry of any token in it
+);
+CREATE INDEX ON refresh_families (subject);
+CREATE INDEX ON refresh_families (expires_at);
 
 CREATE TABLE refresh_tokens (
     id         UUID PRIMARY KEY,
-    family_id  UUID        NOT NULL,
-    subject    TEXT        NOT NULL,
+    family_id  UUID NOT NULL REFERENCES refresh_families ON DELETE CASCADE,
+    subject    TEXT NOT NULL,
     issued_at  TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
-    used_at    TIMESTAMPTZ            -- NULL = unused
+    used_at    TIMESTAMPTZ          -- NULL = unused
 );
-CREATE INDEX ON refresh_tokens (family_id);   -- RevokeRefreshTokenFamily
-CREATE INDEX ON refresh_tokens (subject);     -- RevokeRefreshTokensForSubject
-CREATE INDEX ON refresh_tokens (expires_at);  -- purging
+CREATE INDEX ON refresh_tokens (family_id);
+CREATE INDEX ON refresh_tokens (subject);
+CREATE INDEX ON refresh_tokens (expires_at);
 ```
 
 ### Implementation
 
 A complete implementation of all four interfaces lives in [`examples/sqlstore/sqlstore.go`](../examples/sqlstore/sqlstore.go) (package `github.com/tpyle/auth/v2/examples/sqlstore`). One `sqlstore.Store` value implements `UserStore`, `PasswordHashUpdater`, `KeyStore` and `RefreshTokenStore` using only `database/sql`. Bring your own PostgreSQL driver, for example `github.com/jackc/pgx/v5/stdlib`. Copy it into your project and adapt it. `uuid.UUID` implements `sql.Scanner` and `driver.Valuer`, so it maps straight onto `UUID` columns.
 
-The part that matters most is the atomic consume. A conditional `UPDATE` claims the token only if `used_at IS NULL`. A concurrent caller blocks on the row lock, and PostgreSQL then re-checks the `WHERE` clause against the committed row, so exactly one caller wins. Everyone else falls back to a plain `SELECT`, which returns the already-used record (with its original `used_at`) or reports that it is missing:
+The refresh-token methods rely on PostgreSQL's default **`READ COMMITTED`** isolation level. Under `REPEATABLE READ` or `SERIALIZABLE`, the races below end in serialization errors, which `Refresh` reports as internal errors. Two parts carry the concurrency guarantees.
+
+**Create vs. revoke.** `CreateRefreshToken` upserts the family row in a transaction, which locks that row. Revocation updates the same row before it deletes the tokens, so the two operations serialize:
+
+```go
+// CreateRefreshToken implements auth.RefreshTokenStore.
+//
+// The upsert locks the family row for the rest of the transaction. Revocation
+// updates the same row, so the two serialize: either revocation commits first
+// and this sees revoked = TRUE, or this commits first and revocation's DELETE
+// (a later statement, with a fresh snapshot) removes the new token.
+func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		var revoked bool
+		err := tx.QueryRowContext(ctx, `
+			INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)
+			ON CONFLICT (id) DO UPDATE
+				SET expires_at = GREATEST(refresh_families.expires_at, EXCLUDED.expires_at)
+			RETURNING revoked`, r.FamilyID, r.Subject, r.ExpiresAt).Scan(&revoked)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, r.FamilyID)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO refresh_tokens (id, family_id, subject, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+			r.ID, r.FamilyID, r.Subject, r.IssuedAt, r.ExpiresAt)
+		return err
+	})
+}
+```
+
+```go
+func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE refresh_families SET revoked = TRUE WHERE id = $1`, familyID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE family_id = $1`, familyID)
+		return err
+	})
+}
+```
+
+(`inTx` is a small helper in the example that commits if the function returns nil and rolls back otherwise. `RevokeRefreshTokensForSubject` is the same, keyed on `subject`.)
+
+**Atomic consume.** A conditional `UPDATE` claims the token only if `used_at IS NULL`. A concurrent caller blocks on the row lock, and PostgreSQL then re-checks the `WHERE` clause against the committed row, so exactly one caller wins. Everyone else falls back to a plain `SELECT`, which returns the already-used record (with its original `used_at`) or reports that it is missing:
 
 ```go
 func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.Time) (auth.RefreshTokenRecord, error) {
@@ -183,8 +249,6 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID, now time.
 }
 ```
 
-This relies on PostgreSQL's default `READ COMMITTED` isolation. Under `REPEATABLE READ` or `SERIALIZABLE`, the losing caller gets a serialization error instead, which `Refresh` reports as an internal error.
-
 Wiring:
 
 ```go
@@ -196,7 +260,7 @@ a, err := auth.New(ctx,
 )
 ```
 
-The example also has `PurgeExpiredRefreshTokens(ctx, now)` for the periodic purge.
+The example also has `PurgeExpiredRefreshTokens(ctx, now)`, which deletes expired families (with their tokens) and expired tokens. Run it periodically.
 
 
 ## In-memory implementations
@@ -204,14 +268,14 @@ The example also has `PurgeExpiredRefreshTokens(ctx, now)` for the periodic purg
 | Type | Implements | Notes |
 |---|---|---|
 | `MemoryUserStore` (`NewMemoryUserStore()`) | `UserStore`, `PasswordHashUpdater` | `SetPasswordHash(username, hash)` adds a user or replaces one. |
-| `MemoryKeyStore` (`NewMemoryKeyStore()`) | `KeyStore` | Used automatically when no `KeyStore` is given. |
-| `MemoryRefreshTokenStore` (`NewMemoryRefreshTokenStore()`) | `RefreshTokenStore` | Purges expired records on every `CreateRefreshToken`. `Len()` reports how many records it holds, including used ones. |
+| `MemoryKeyStore` (`NewMemoryKeyStore()`) | `KeyStore` | Used automatically when no `KeyStore` is given. Keeps keys in encoded (PKIX DER) form, like a database would, and `StoreKey` rejects a key without a `PublicKey`. |
+| `MemoryRefreshTokenStore` (`NewMemoryRefreshTokenStore()`) | `RefreshTokenStore` | Tracks families and their revoked state under one mutex, so creation and revocation are atomic. Purges expired records and families on every `CreateRefreshToken`. `Len()` reports how many records it holds, including used ones (families are not counted). |
 
-All of them are safe for concurrent use. They store copies, not caller-owned pointers.
+All of them are safe for concurrent use. They never keep caller-owned pointers, so changing a value after passing it in does not affect the store.
 
 Limits:
 
 - **Nothing survives a restart.** With the default `MemoryKeyStore`, every token issued before a restart fails verification after it, because the new process cannot find the old keys. Every user has to log in again.
 - **The default `MemoryKeyStore` works for one instance only.** Each process gets its own private store, so a token issued by instance A fails with `ErrInvalidToken` on instance B. Behind a load balancer, use a shared `KeyStore` (and a shared `RefreshTokenStore`).
-- `MemoryRefreshTokenStore` uses the real wall clock to purge records. It ignores `WithClock`.
+- `MemoryRefreshTokenStore` uses the real wall clock to purge records and families. It ignores `WithClock`.
 - They are meant for tests, examples, prototypes and single-instance services that can accept losing every session on restart.

@@ -14,7 +14,7 @@ import "github.com/tpyle/auth/v2"
 
 ## Create an Authorizer
 
-An `Authorizer` does all the work. Create it with `auth.New` and stop it with `Close`. `New` checks the configuration, generates the first signing key (and the next one, which is published ahead of use), stores their public halves, and starts key rotation in the background. Only the setup work in `New` respects `ctx`. Rotation keeps running until you call `Close`.
+An `Authorizer` does all the work. Create it with `auth.New` and stop it with `Close`. `New` checks the configuration, generates the first signing key (and the next one, which is published ahead of use), stores their public halves, and starts key rotation in the background. With a `UserStore` configured, it also computes one Argon2 hash up front: the dummy hash used to equalize timing for unknown users. Only the setup work in `New` respects `ctx`. Rotation keeps running until you call `Close`.
 
 ```go
 ctx := context.Background()

@@ -29,6 +29,16 @@ const (
 type signingKey struct {
 	id      uuid.UUID
 	private *ecdsa.PrivateKey
+	// signUntil is the end of the key's planned signing window; zero means
+	// unlimited. The stored ExpiresAt covers tokens signed up to
+	// keyRetentionMargin after it.
+	signUntil time.Time
+}
+
+// usable reports whether tokens signed at now are covered by the key's
+// stored expiry.
+func (k *signingKey) usable(now time.Time) bool {
+	return k.signUntil.IsZero() || !now.After(k.signUntil.Add(keyRetentionMargin))
 }
 
 // keyManager owns this process's signing keys and rotates them, and resolves
@@ -85,8 +95,10 @@ func (km *keyManager) generate(ctx context.Context, activatesAt time.Time) (*sig
 		PublicKey: &priv.PublicKey,
 		CreatedAt: km.s.now(),
 	}
+	var signUntil time.Time
 	if km.s.KeyRotationInterval > 0 {
-		vk.ExpiresAt = activatesAt.Add(km.s.KeyRotationInterval + km.s.maxTokenTTL() + keyRetentionMargin)
+		signUntil = activatesAt.Add(km.s.KeyRotationInterval)
+		vk.ExpiresAt = signUntil.Add(km.s.maxTokenTTL() + keyRetentionMargin)
 	}
 	if err := km.s.keyStore.StoreKey(ctx, vk); err != nil {
 		return nil, fmt.Errorf("auth: storing signing key: %w", err)
@@ -94,7 +106,7 @@ func (km *keyManager) generate(ctx context.Context, activatesAt time.Time) (*sig
 	km.mu.Lock()
 	km.known[vk.ID] = vk
 	km.mu.Unlock()
-	return &signingKey{id: vk.ID, private: priv}, nil
+	return &signingKey{id: vk.ID, private: priv, signUntil: signUntil}, nil
 }
 
 // ensureNext generates and stores the next key if there is none yet.
@@ -113,22 +125,48 @@ func (km *keyManager) ensureNext(ctx context.Context, activatesAt time.Time) err
 }
 
 // rotate starts signing with the next key. If none was pre-generated (because
-// storing it failed), one is generated and stored first. Storing always
-// happens before signing, so no token is issued before other instances can
-// look up its key.
+// storing it failed), or its signing window has already passed (because
+// rotation ran very late), a fresh key is generated and stored first. Storing
+// always happens before signing, so no token is issued before other
+// instances can look up its key.
 func (km *keyManager) rotate(ctx context.Context) error {
 	km.rotMu.Lock()
 	defer km.rotMu.Unlock()
+	return km.rotateLocked(ctx)
+}
+
+func (km *keyManager) rotateLocked(ctx context.Context) error {
+	now := km.s.now()
 	next := km.next
-	if next == nil {
+	if next == nil || !next.usable(now) {
 		var err error
-		if next, err = km.generate(ctx, km.s.now()); err != nil {
+		if next, err = km.generate(ctx, now); err != nil {
 			return err
 		}
 	}
 	km.current.Store(next)
 	km.next = nil
 	return nil
+}
+
+// signer returns the key to sign with now. Normally that is the current key,
+// but if the rotation loop has fallen behind (for example because the process
+// was suspended) the current key may be past its window, and signing with it
+// would produce tokens that outlive its stored expiry. In that case it rotates
+// first, and fails rather than sign with a key that is no longer covered.
+func (km *keyManager) signer(ctx context.Context) (*signingKey, error) {
+	if k := km.current.Load(); k.usable(km.s.now()) {
+		return k, nil
+	}
+	km.rotMu.Lock()
+	defer km.rotMu.Unlock()
+	if k := km.current.Load(); k.usable(km.s.now()) {
+		return k, nil // another goroutine rotated while we waited
+	}
+	if err := km.rotateLocked(ctx); err != nil {
+		return nil, fmt.Errorf("auth: signing key expired and rotation failed: %w", err)
+	}
+	return km.current.Load(), nil
 }
 
 // cleanup deletes expired keys from the store and the in-memory set. Keys

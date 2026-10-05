@@ -48,22 +48,33 @@ func (s *MemoryUserStore) UpdatePasswordHash(_ context.Context, username, encode
 // MemoryKeyStore is an in-memory [KeyStore]. It is the default when [New] is
 // not given a key store. Because it is not shared, tokens can only be
 // verified by the process that issued them and do not survive a restart.
+//
+// Keys are held in encoded form, like a database would, so callers can never
+// share mutable state with the store.
 type MemoryKeyStore struct {
 	mu   sync.RWMutex
-	keys map[uuid.UUID]*VerificationKey
+	keys map[uuid.UUID]memoryKey
+}
+
+type memoryKey struct {
+	der                  []byte
+	createdAt, expiresAt time.Time
 }
 
 // NewMemoryKeyStore returns an empty [MemoryKeyStore].
 func NewMemoryKeyStore() *MemoryKeyStore {
-	return &MemoryKeyStore{keys: map[uuid.UUID]*VerificationKey{}}
+	return &MemoryKeyStore{keys: map[uuid.UUID]memoryKey{}}
 }
 
 // StoreKey implements [KeyStore].
 func (s *MemoryKeyStore) StoreKey(_ context.Context, key *VerificationKey) error {
+	der, err := key.MarshalPublicKey()
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := *key
-	s.keys[key.ID] = &k
+	s.keys[key.ID] = memoryKey{der: der, createdAt: key.CreatedAt, expiresAt: key.ExpiresAt}
 	return nil
 }
 
@@ -72,9 +83,12 @@ func (s *MemoryKeyStore) ListKeys(_ context.Context) ([]*VerificationKey, error)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*VerificationKey, 0, len(s.keys))
-	for _, k := range s.keys {
-		c := *k
-		out = append(out, &c)
+	for id, k := range s.keys {
+		pub, err := ParsePublicKey(k.der)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &VerificationKey{ID: id, PublicKey: pub, CreatedAt: k.createdAt, ExpiresAt: k.expiresAt})
 	}
 	return out, nil
 }
@@ -90,17 +104,28 @@ func (s *MemoryKeyStore) DeleteKeys(_ context.Context, ids []uuid.UUID) error {
 }
 
 // MemoryRefreshTokenStore is an in-memory [RefreshTokenStore] intended for
-// tests and single-instance deployments. Expired records are purged whenever
-// a new token is created.
+// tests and single-instance deployments. Expired records and families are
+// purged whenever a new token is created.
 type MemoryRefreshTokenStore struct {
-	mu      sync.Mutex
-	records map[uuid.UUID]RefreshTokenRecord
-	now     func() time.Time
+	mu       sync.Mutex
+	records  map[uuid.UUID]RefreshTokenRecord
+	families map[uuid.UUID]*memoryFamily
+	now      func() time.Time
+}
+
+type memoryFamily struct {
+	subject   string
+	revoked   bool
+	expiresAt time.Time // latest expiry of any token in the family
 }
 
 // NewMemoryRefreshTokenStore returns an empty [MemoryRefreshTokenStore].
 func NewMemoryRefreshTokenStore() *MemoryRefreshTokenStore {
-	return &MemoryRefreshTokenStore{records: map[uuid.UUID]RefreshTokenRecord{}, now: time.Now}
+	return &MemoryRefreshTokenStore{
+		records:  map[uuid.UUID]RefreshTokenRecord{},
+		families: map[uuid.UUID]*memoryFamily{},
+		now:      time.Now,
+	}
 }
 
 // CreateRefreshToken implements [RefreshTokenStore].
@@ -112,6 +137,21 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 		if now.After(r.ExpiresAt) {
 			delete(s.records, id)
 		}
+	}
+	for id, f := range s.families {
+		if now.After(f.expiresAt) {
+			delete(s.families, id)
+		}
+	}
+
+	f := s.families[rec.FamilyID]
+	switch {
+	case f == nil:
+		s.families[rec.FamilyID] = &memoryFamily{subject: rec.Subject, expiresAt: rec.ExpiresAt}
+	case f.revoked:
+		return fmt.Errorf("%w: family %s", ErrTokenRevoked, rec.FamilyID)
+	case rec.ExpiresAt.After(f.expiresAt):
+		f.expiresAt = rec.ExpiresAt
 	}
 	s.records[rec.ID] = rec
 	return nil
@@ -137,11 +177,7 @@ func (s *MemoryRefreshTokenStore) ConsumeRefreshToken(_ context.Context, id uuid
 func (s *MemoryRefreshTokenStore) RevokeRefreshTokenFamily(_ context.Context, familyID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id, r := range s.records {
-		if r.FamilyID == familyID {
-			delete(s.records, id)
-		}
-	}
+	s.revokeLocked(familyID)
 	return nil
 }
 
@@ -149,12 +185,23 @@ func (s *MemoryRefreshTokenStore) RevokeRefreshTokenFamily(_ context.Context, fa
 func (s *MemoryRefreshTokenStore) RevokeRefreshTokensForSubject(_ context.Context, subject string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id, r := range s.records {
-		if r.Subject == subject {
-			delete(s.records, id)
+	for id, f := range s.families {
+		if f.subject == subject {
+			s.revokeLocked(id)
 		}
 	}
 	return nil
+}
+
+func (s *MemoryRefreshTokenStore) revokeLocked(familyID uuid.UUID) {
+	if f := s.families[familyID]; f != nil {
+		f.revoked = true
+	}
+	for id, r := range s.records {
+		if r.FamilyID == familyID {
+			delete(s.records, id)
+		}
+	}
 }
 
 // Len returns the number of records held, including used ones.

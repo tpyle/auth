@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"testing"
 	"time"
@@ -34,7 +37,8 @@ func TestMemoryKeyStore(t *testing.T) {
 	if storedKey(t, s, id) != nil {
 		t.Fatal("empty store returned a key")
 	}
-	k := &VerificationKey{ID: id, CreatedAt: time.Unix(1, 0)}
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	k := &VerificationKey{ID: id, PublicKey: &priv.PublicKey, CreatedAt: time.Unix(1, 0)}
 	if err := s.StoreKey(ctx, k); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +46,9 @@ func TestMemoryKeyStore(t *testing.T) {
 	got := storedKey(t, s, id)
 	if got == nil || !got.CreatedAt.Equal(time.Unix(1, 0)) {
 		t.Errorf("stored key = %+v", got)
+	}
+	if !got.PublicKey.Equal(&priv.PublicKey) {
+		t.Error("public key changed in storage")
 	}
 	got.CreatedAt = time.Unix(3, 0)
 	list, _ := s.ListKeys(ctx)
@@ -92,7 +99,7 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 
 	// Creating a token after a's expiry purges it.
 	clock.Advance(90 * time.Minute)
-	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: other, ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
+	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), Subject: "zed", ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if s.Len() != 3 {
@@ -125,6 +132,21 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 	if err := s.RevokeRefreshTokensForSubject(ctx, "nobody"); err != nil {
 		t.Errorf("revoking unknown subject: %v", err)
 	}
+
+	// Revoked families accept no new tokens until they expire.
+	for name, family := range map[string]uuid.UUID{"by family": fam, "by subject": other} {
+		err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: family, ExpiresAt: clock.Now().Add(time.Hour)})
+		if !errors.Is(err, ErrTokenRevoked) {
+			t.Errorf("%s: create in revoked family: err = %v; want ErrTokenRevoked", name, err)
+		}
+	}
+	clock.Advance(3 * time.Hour) // every family's tokens have expired
+	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.families) != 1 {
+		t.Errorf("%d families after expiry; want only the new one", len(s.families))
+	}
 }
 
 func TestParsePublicKey(t *testing.T) {
@@ -144,5 +166,8 @@ func TestParsePublicKey(t *testing.T) {
 	}
 	if _, err := (&VerificationKey{}).MarshalPublicKey(); err == nil {
 		t.Error("expected error marshaling nil key")
+	}
+	if err := NewMemoryKeyStore().StoreKey(context.Background(), &VerificationKey{ID: uuid.New()}); err == nil {
+		t.Error("MemoryKeyStore accepted a key without a public key")
 	}
 }

@@ -41,8 +41,8 @@ func TestAuthenticate(t *testing.T) {
 			}
 		})
 	}
-	if a.dummy() == "" {
-		t.Error("dummy hash was not computed for the unknown user")
+	if a.dummyHash == "" {
+		t.Error("dummy hash was not computed")
 	}
 }
 
@@ -129,6 +129,9 @@ func TestHashConcurrencyLimit(t *testing.T) {
 		t.Fatal("HashPassword produced an unverifiable hash")
 	}
 
+	users := NewMemoryUserStore()
+	a.s.userStore = users
+	a.dummyHash = mustHash(t, "dummy")
 	a.hashSem <- struct{}{} // occupy the only slot
 	defer a.releaseHashSlot()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -136,11 +139,13 @@ func TestHashConcurrencyLimit(t *testing.T) {
 	if _, err := a.HashPassword(ctx, []byte("pw")); !errors.Is(err, context.Canceled) {
 		t.Errorf("HashPassword err = %v; want context.Canceled", err)
 	}
-	users := NewMemoryUserStore()
 	users.SetPasswordHash("bob", h)
-	a.s.userStore = users
 	if err := a.Authenticate(ctx, "bob", []byte("pw")); !errors.Is(err, context.Canceled) {
 		t.Errorf("Authenticate err = %v; want context.Canceled", err)
+	}
+	// Unknown users report cancellation the same way known users do.
+	if err := a.Authenticate(ctx, "nobody", []byte("pw")); !errors.Is(err, context.Canceled) {
+		t.Errorf("Authenticate(unknown) err = %v; want context.Canceled", err)
 	}
 }
 
@@ -519,8 +524,10 @@ func TestRefreshConcurrentWithoutGrace(t *testing.T) {
 	ctx := context.Background()
 	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithRefreshReuseGrace(0))
 	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
-	if got := concurrentRefreshes(a, pair.RefreshToken, 8); got != 1 {
-		t.Errorf("%d concurrent refreshes succeeded; want exactly 1", got)
+	// Any reuse is theft, so the session is revoked. The first request may
+	// still win if it finishes before a reuse is detected.
+	if got := concurrentRefreshes(a, pair.RefreshToken, 8); got > 1 {
+		t.Errorf("%d concurrent refreshes succeeded; want at most 1", got)
 	}
 }
 
@@ -577,6 +584,34 @@ func TestRefreshReuseClockOrdering(t *testing.T) {
 		if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, tt.want) || (tt.want == nil && err != nil) {
 			t.Errorf("grace %v: err = %v; want %v", tt.grace, err, tt.want)
 		}
+	}
+}
+
+// A revocation that lands between consuming a refresh token and storing its
+// replacement must not leave the replacement usable.
+func TestRevocationDuringRefresh(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name   string
+		revoke func(a *Authorizer, pair *TokenPair) error
+	}{
+		{"logout", func(a *Authorizer, p *TokenPair) error { return a.Logout(ctx, p.RefreshToken) }},
+		{"revoke all", func(a *Authorizer, _ *TokenPair) error { return a.RevokeAllSessions(ctx, "bob") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &faultyRefreshStore{RefreshTokenStore: NewMemoryRefreshTokenStore()}
+			a := newRefreshAuthorizer(t, store)
+			pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+			store.beforeCreate = func() {
+				store.beforeCreate = nil
+				if err := tt.revoke(a, pair); err != nil {
+					t.Error(err)
+				}
+			}
+			if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, ErrTokenRevoked) {
+				t.Errorf("err = %v; want ErrTokenRevoked", err)
+			}
+		})
 	}
 }
 
@@ -836,6 +871,14 @@ func TestJWKS(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 	keys.fail(&keys.listErr, nil)
+
+	// Malformed rows are skipped rather than crashing the endpoint.
+	keys.mu.Lock()
+	keys.extra = []*VerificationKey{nil, {ID: uuid.New()}}
+	keys.mu.Unlock()
+	if set, err := a.JWKS(ctx); err != nil || len(set.Keys) != 2 {
+		t.Errorf("JWKS with malformed keys = %v, %v", set, err)
+	}
 
 	bad, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	_ = keys.StoreKey(ctx, &VerificationKey{ID: uuid.New(), PublicKey: &bad.PublicKey})

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestTokenFromRequest(t *testing.T) {
@@ -238,6 +239,21 @@ func TestJWKSHandler(t *testing.T) {
 	var set JWKSet
 	if err := json.Unmarshal(rec.Body.Bytes(), &set); err != nil || len(set.Keys) != 2 { // current and next
 		t.Errorf("body %q: %v", rec.Body.String(), err)
+	}
+
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("Cache-Control = %q", got)
+	}
+	for interval, want := range map[time.Duration]string{
+		4 * time.Minute: "public, max-age=120",
+		0:               "public, max-age=300",
+	} {
+		short := newTestAuthorizer(t, WithKeyRotationInterval(interval))
+		rec := httptest.NewRecorder()
+		short.JWKSHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("rotation %v: Cache-Control = %q; want %q", interval, got, want)
+		}
 	}
 
 	keys.fail(&keys.listErr, errTest)

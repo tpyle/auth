@@ -4,9 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// jwksMaxAge is the longest time JWKS responses may be cached.
+const jwksMaxAge = 5 * time.Minute
 
 type claimsKey struct{}
 
@@ -125,8 +130,15 @@ func defaultUnauthorized(w http.ResponseWriter, _ *http.Request, err error) {
 }
 
 // JWKSHandler serves [Authorizer.JWKS] as JSON. Mount it at
-// /.well-known/jwks.json. Responses may be cached for five minutes.
+// /.well-known/jwks.json. Responses may be cached for five minutes, or half
+// of [Config.KeyRotationInterval] if that is shorter, so a cached set always
+// includes a pre-published key before it starts signing.
 func (a *Authorizer) JWKSHandler() http.Handler {
+	maxAge := jwksMaxAge
+	if a.s.KeyRotationInterval > 0 {
+		maxAge = min(maxAge, a.s.KeyRotationInterval/2)
+	}
+	cacheControl := fmt.Sprintf("public, max-age=%d", int(maxAge.Seconds()))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		set, err := a.JWKS(r.Context())
 		if err != nil {
@@ -135,7 +147,7 @@ func (a *Authorizer) JWKSHandler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Cache-Control", cacheControl)
 		_ = json.NewEncoder(w).Encode(set)
 	})
 }

@@ -26,7 +26,8 @@ type Authorizer struct {
 
 	hashSem chan struct{}
 
-	dummyOnce sync.Once
+	// dummyHash is verified against when a user does not exist, so unknown
+	// users take as long to reject as wrong passwords.
 	dummyHash string
 
 	closed    atomic.Bool
@@ -61,8 +62,16 @@ func New(ctx context.Context, opts ...Option) (*Authorizer, error) {
 	strict := append(common[:len(common):len(common)],
 		jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(s.Leeway))
 
+	var dummy string
+	if s.userStore != nil {
+		if dummy, err = HashPassword([]byte(rand.Text()), s.Argon2); err != nil {
+			return nil, err
+		}
+	}
+
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	a := &Authorizer{
+		dummyHash:     dummy,
 		s:             s,
 		keys:          km,
 		parser:        jwt.NewParser(strict...),
@@ -125,23 +134,6 @@ func (a *Authorizer) verifyPassword(ctx context.Context, password []byte, encode
 	return VerifyPassword(password, encodedHash)
 }
 
-// dummy returns a hash to verify against when a user does not exist, so that
-// unknown users take as long to reject as wrong passwords.
-func (a *Authorizer) dummy() string {
-	a.dummyOnce.Do(func() {
-		h, err := HashPassword([]byte(rand.Text()), a.s.Argon2)
-		if err != nil {
-			// Params were validated in New, so this means the system RNG
-			// failed; fall back to an unverifiable hash rather than skipping
-			// the work entirely.
-			a.s.logger.Error("auth: creating dummy hash", "error", err)
-			return
-		}
-		a.dummyHash = h
-	})
-	return a.dummyHash
-}
-
 // Authenticate checks username and password against the [UserStore]. It
 // returns nil on success and [ErrInvalidCredentials] if the user does not
 // exist or the password is wrong; both cases take similar time.
@@ -155,8 +147,8 @@ func (a *Authorizer) Authenticate(ctx context.Context, username string, password
 	}
 	stored, err := a.s.userStore.LookupPasswordHash(ctx, username)
 	if errors.Is(err, ErrUserNotFound) {
-		if d := a.dummy(); d != "" {
-			_, _ = a.verifyPassword(ctx, password, d)
+		if _, err := a.verifyPassword(ctx, password, a.dummyHash); err != nil {
+			return err
 		}
 		return ErrInvalidCredentials
 	}
@@ -225,7 +217,9 @@ func (a *Authorizer) IssueAccessToken(subject string, extra map[string]any) (str
 	if err := a.checkOpen(); err != nil {
 		return "", err
 	}
-	tok, _, err := a.issueAccess(subject, extra)
+	// A context is only needed in the rare case that the signing key must
+	// be rotated on the spot; see keyManager.signer.
+	tok, _, err := a.issueAccess(context.Background(), subject, extra)
 	return tok, err
 }
 
@@ -325,8 +319,7 @@ func (a *Authorizer) withinReuseGrace(now, usedAt time.Time) bool {
 // device signed in.
 //
 // Access tokens already issued stay valid until they expire. A refresh that
-// is in flight at the moment of revocation may still complete and issue a
-// new pair.
+// is in flight at the moment of revocation fails with [ErrTokenRevoked].
 func (a *Authorizer) RevokeAllSessions(ctx context.Context, subject string) error {
 	if err := a.s.requireRefreshStore(); err != nil {
 		return err
@@ -365,12 +358,13 @@ func (a *Authorizer) JWKS(ctx context.Context) (*JWKSet, error) {
 		return nil, fmt.Errorf("auth: listing signing keys: %w", err)
 	}
 	now := a.s.now()
+	// Skip malformed rows and expired keys.
+	keys = slices.DeleteFunc(keys, func(k *VerificationKey) bool {
+		return k == nil || k.PublicKey == nil || k.expired(now)
+	})
 	slices.SortFunc(keys, func(x, y *VerificationKey) int { return y.CreatedAt.Compare(x.CreatedAt) })
 	set := &JWKSet{Keys: []JWK{}}
 	for _, k := range keys {
-		if k.expired(now) {
-			continue
-		}
 		jwk, err := newJWK(k.ID, k.PublicKey)
 		if err != nil {
 			return nil, err

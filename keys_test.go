@@ -332,10 +332,12 @@ func TestLookupStoreFailure(t *testing.T) {
 
 func TestLookupSkipsMalformedStoredKeys(t *testing.T) {
 	ctx := context.Background()
-	keys := NewMemoryKeyStore()
+	keys := newFaultyKeyStore()
 	a := newTestAuthorizer(t, WithKeyStore(keys))
 	id := uuid.New()
-	_ = keys.StoreKey(ctx, &VerificationKey{ID: id})
+	keys.mu.Lock()
+	keys.extra = []*VerificationKey{nil, {ID: id}}
+	keys.mu.Unlock()
 	mc := jwt.MapClaims{"sub": "bob", "iat": time.Now().Unix(), "exp": time.Now().Unix() + 60, "jti": uuid.NewString(), "typ": "access"}
 	if _, err := a.VerifyAccessToken(ctx, signRaw(t, a, mc, map[string]any{"kid": id.String()})); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("err = %v; want ErrInvalidToken", err)
@@ -353,6 +355,68 @@ func TestLookupExpiredKey(t *testing.T) {
 	if _, err := verifier.VerifyAccessToken(ctx, tok); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("err = %v; want ErrInvalidToken", err)
 	}
+}
+
+// The rotation loop can fall behind, e.g. while the process is suspended.
+// Signing must never use a key past the window its stored expiry covers.
+func TestSignerRotatesOverdueKeys(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("promotes pre-generated key", func(t *testing.T) {
+		clock := newFakeClock()
+		a := newTestAuthorizer(t, WithClock(clock.Now), WithKeyRotationInterval(time.Hour))
+		next := a.keys.nextID()
+		clock.Advance(time.Hour + keyRetentionMargin) // last instant the old key is covered
+		if _, err := a.IssueAccessToken("bob", nil); err != nil || a.keys.nextID() != next {
+			t.Fatalf("rotated too early: err %v", err)
+		}
+		clock.Advance(time.Second)
+		tok, err := a.IssueAccessToken("bob", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.keys.current.Load().id != next {
+			t.Error("overdue key was not replaced by the pre-generated key")
+		}
+		if _, err := a.VerifyAccessToken(ctx, tok); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("replaces stale pre-generated key", func(t *testing.T) {
+		clock := newFakeClock()
+		a := newTestAuthorizer(t, WithClock(clock.Now), WithKeyRotationInterval(time.Hour))
+		next := a.keys.nextID()
+		clock.Advance(3 * time.Hour) // past the next key's window too
+		if _, err := a.IssueAccessToken("bob", nil); err != nil {
+			t.Fatal(err)
+		}
+		cur := a.keys.current.Load()
+		if cur.id == next || !cur.usable(clock.Now()) {
+			t.Error("stale pre-generated key was promoted")
+		}
+	})
+
+	t.Run("fails closed when no key can be stored", func(t *testing.T) {
+		clock := newFakeClock()
+		keys := newFaultyKeyStore()
+		a := newTestAuthorizer(t, WithClock(clock.Now), WithKeyStore(keys), WithKeyRotationInterval(time.Hour))
+		clock.Advance(3 * time.Hour)
+		keys.fail(&keys.storeErr, errTest)
+		if _, err := a.IssueAccessToken("bob", nil); !errors.Is(err, errTest) {
+			t.Errorf("err = %v; want errTest", err)
+		}
+	})
+
+	t.Run("no window without rotation", func(t *testing.T) {
+		clock := newFakeClock()
+		a := newTestAuthorizer(t, WithClock(clock.Now), WithKeyRotationInterval(0))
+		first := a.keys.current.Load().id
+		clock.Advance(365 * 24 * time.Hour)
+		if _, err := a.IssueAccessToken("bob", nil); err != nil || a.keys.current.Load().id != first {
+			t.Errorf("key rotated without rotation enabled: %v", err)
+		}
+	})
 }
 
 func newLoopAuthorizer(t *testing.T, keys KeyStore) *Authorizer {

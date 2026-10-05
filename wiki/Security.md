@@ -36,18 +36,20 @@ When you change `Argon2` parameters, existing hashes keep working because each h
 
 ### Unknown users
 
-If `LookupPasswordHash` returns `ErrUserNotFound`, `Authenticate` still runs a full Argon2 verification against a dummy hash made with the current parameters. Then it returns the same `ErrInvalidCredentials` as for a wrong password. Response time and error therefore do not reveal whether a username exists. Two limits remain:
+If `LookupPasswordHash` returns `ErrUserNotFound`, `Authenticate` still runs a full Argon2 verification against a dummy hash made with the current parameters. Then it returns the same `ErrInvalidCredentials` as for a wrong password. Response time and error therefore do not reveal whether a username exists.
 
-- The dummy hash is created on the first unknown-user login, so that one request takes about twice as long.
-- Users whose stored hash still uses older, different parameters take a different time to verify than the dummy, until their hash is upgraded.
+The dummy hash is computed once in `New` when a `UserStore` is configured, so `New` performs one extra Argon2 hash at startup. Verifying against it takes a hashing slot like any other login, so it respects `MaxConcurrentHashes`. The path behaves like a real login in other ways too: if the context is cancelled while waiting for a slot, unknown-user logins return the context error just as known users do.
+
+One limit remains: users whose stored hash still uses older, different parameters take a different time to verify than the dummy, until their hash is upgraded.
 
 ## Tokens
 
 - **ES256 only.** Tokens are signed with ECDSA P-256 / SHA-256. The parser accepts only `ES256`, which blocks `alg: none` and algorithm-confusion attacks.
 - **Private keys never leave the process.** They are generated in memory, never written to disk or to any store, and die with the process. Only public keys go to the `KeyStore`. A leaked key database therefore cannot be used to forge tokens. Its integrity still matters, though: anyone who can **write** to the key table can insert their own public key and forge tokens with it. Restrict write access to it.
-- **Key rotation** (default every 24h) limits how long a key is in use. See [Tokens and Keys](Tokens-and-Keys.md#signing-key-rotation).
+- **Key rotation** (default every 24h) limits how long a key is in use. A signing-time guard refuses to sign with a key past its window (if the rotation loop fell behind) when no fresh key can be stored, so every token is covered by its key's stored expiry. See [Tokens and Keys](Tokens-and-Keys.md#signing-time-guard).
 - **Access and refresh tokens cannot be swapped.** The `typ` claim is checked on every verification.
 - **Refresh-token reuse detection** revokes a session when a stolen refresh token is used after (or before) the real client uses it.
+- **Revocation is final.** Stores track revoked families, so a refresh in flight at the moment of a logout, `RevokeAllSessions` or a theft detection cannot leave behind a working token. See [Tokens and Keys](Tokens-and-Keys.md#revocation-is-final).
 - **Reuse grace period trade-off.** `RefreshReuseGrace` (default 30s) lets a spent refresh token be used again for a short time after its first use without revoking anything. This keeps users logged in when several tabs refresh at once or a response is lost. The cost: an attacker who replays a stolen token **within that window** gets a working session, and the theft is not detected. The window is fixed from the first use and does not slide. Keep it to seconds. Set it to 0 for strict detection if your clients never refresh concurrently. See [reuse detection](Tokens-and-Keys.md#reuse-detection).
 
 ### Issuer and audience
