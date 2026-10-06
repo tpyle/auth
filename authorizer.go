@@ -314,10 +314,13 @@ func (a *Authorizer) Logout(ctx context.Context, refreshToken string) error {
 
 // withinReuseGrace reports whether a reuse at now of a token first used at
 // usedAt is tolerated. now may precede usedAt when concurrent requests (or
-// instances with skewed clocks) race, so with the grace period disabled any
-// reuse is rejected regardless of ordering.
+// instances with skewed clocks) race, so the difference is bounded in both
+// directions: a fast clock elsewhere cannot stretch the window. With the
+// grace period disabled any reuse is rejected regardless of ordering.
 func (a *Authorizer) withinReuseGrace(now, usedAt time.Time) bool {
-	return a.s.RefreshReuseGrace > 0 && now.Sub(usedAt) <= a.s.RefreshReuseGrace
+	grace := a.s.RefreshReuseGrace
+	d := now.Sub(usedAt)
+	return grace > 0 && d <= grace && d >= -grace
 }
 
 // RevokeAllSessions revokes every refresh token issued to subject, across all

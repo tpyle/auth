@@ -662,21 +662,26 @@ func TestRefreshReuseClockOrdering(t *testing.T) {
 	ctx := context.Background()
 	for _, tt := range []struct {
 		grace time.Duration
+		back  time.Duration // how far the reusing clock is behind the first use
 		want  error
 	}{
-		{0, ErrRefreshTokenReused},
-		{30 * time.Second, nil},
+		{0, time.Second, ErrRefreshTokenReused},
+		{30 * time.Second, time.Second, nil},
+		{30 * time.Second, 30 * time.Second, nil},
+		// A clock far ahead elsewhere must not stretch the window.
+		{30 * time.Second, 31 * time.Second, ErrRefreshTokenReused},
+		{30 * time.Second, time.Hour, ErrRefreshTokenReused},
 	} {
 		clock := newFakeClock()
 		a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now), WithRefreshReuseGrace(tt.grace))
 		pair, _ := a.IssueTokenPair(ctx, "bob", nil)
-		clock.Advance(2 * time.Second)
+		clock.Advance(2 * time.Hour)
 		if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
 			t.Fatal(err)
 		}
-		clock.Advance(-time.Second) // still after the token's iat
+		clock.Advance(-tt.back) // still after the token's iat
 		if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, tt.want) || (tt.want == nil && err != nil) {
-			t.Errorf("grace %v: err = %v; want %v", tt.grace, err, tt.want)
+			t.Errorf("grace %v, %v behind: err = %v; want %v", tt.grace, tt.back, err, tt.want)
 		}
 	}
 }

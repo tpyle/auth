@@ -108,6 +108,8 @@ Each of these gets a valid new pair instead of being logged out.
 
 The window is measured from the token's **first** use. `UsedAt` is set once and never overwritten, so repeated reuses do not extend the window. A token is accepted for at most `RefreshReuseGrace` after its first exchange, however often it is presented.
 
+The window applies in both directions. When instances' clocks differ, a reuse can appear to happen *before* the first use. It is tolerated only if it is within `RefreshReuseGrace` of the first use either way, so a fast clock on another instance cannot stretch the window. Keep instance clocks synchronized (for example with NTP) to well within `RefreshReuseGrace`. If skew exceeds it, legitimate concurrent refreshes across instances are treated as theft. That fails safe, but it logs users out.
+
 **Security trade-off:** a stolen refresh token replayed inside the window is not detected. The attacker gets a working pair in the same family, and nothing is revoked. Keep the window short. Seconds are enough for the races above.
 
 **`RefreshReuseGrace = 0` is strict mode.** Any second use of a token is treated as theft, even if the two requests raced and the clocks on two instances make the second appear earlier than the first. In strict mode, concurrent refreshes and retries after a lost response **do** revoke the session. That includes the new token the first request is issuing: either its creation is refused, or the revocation deletes it (see [Revocation is final](#revocation-is-final)). Both requests end up logged out. The same happens with a grace period if the second use comes after the window. Clients should then make sure only one refresh is in flight at a time and always save the newest refresh token.
