@@ -94,6 +94,15 @@ func (f *failAfterStore) StoreKey(ctx context.Context, k *VerificationKey) error
 	return f.KeyStore.StoreKey(ctx, k)
 }
 
+func TestCleanupSkipsMalformedKeys(t *testing.T) {
+	keys := newFaultyKeyStore()
+	keys.extra = []*VerificationKey{nil, {ID: uuid.New()}}
+	a := newTestAuthorizer(t, WithKeyStore(keys)) // New runs cleanup
+	if err := a.keys.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNewToleratesCleanupFailure(t *testing.T) {
 	keys := newFaultyKeyStore()
 	keys.fail(&keys.listErr, errTest)

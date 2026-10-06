@@ -117,6 +117,53 @@ func TestDecodePHCErrors(t *testing.T) {
 	}
 }
 
+func TestVerifyPasswordLimits(t *testing.T) {
+	limits := DefaultArgon2Limits()
+	if err := DefaultArgon2Params().within(limits); err != nil {
+		t.Fatalf("defaults exceed default limits: %v", err)
+	}
+	// A legacy v1 hash (m=128 MiB, t=4, p=4) must stay verifiable.
+	if err := (Argon2Params{MemoryKiB: 128 * 1024, Iterations: 4, Parallelism: 4, SaltLength: 16, KeyLength: 32}).within(limits); err != nil {
+		t.Fatalf("v1 parameters rejected: %v", err)
+	}
+
+	const salt = "c29tZXNhbHRzb21lc2FsdA"
+	const hash = "aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g"
+	// These would allocate ~4 TiB or run for hours if computed.
+	for name, h := range map[string]string{
+		"memory":      "$argon2id$v=19$m=4294967295,t=1,p=1$" + salt + "$" + hash,
+		"iterations":  "$argon2id$v=19$m=64,t=4294967295,p=1$" + salt + "$" + hash,
+		"key length":  "$argon2id$v=19$m=64,t=1,p=1$" + salt + "$" + strings.Repeat("A", 200),
+		"salt length": "$argon2id$v=19$m=64,t=1,p=1$" + strings.Repeat("A", 100) + "$" + hash,
+	} {
+		if _, err := VerifyPassword([]byte("pw"), h); !errors.Is(err, ErrInvalidHash) {
+			t.Errorf("%s: err = %v; want ErrInvalidHash", name, err)
+		}
+	}
+
+	h := mustHash(t, "pw")
+	tight := testArgon2
+	tight.MemoryKiB = 32
+	if _, err := VerifyPasswordWithLimits([]byte("pw"), h, tight); !errors.Is(err, ErrInvalidHash) {
+		t.Errorf("custom limits: err = %v; want ErrInvalidHash", err)
+	}
+	if ok, err := VerifyPasswordWithLimits([]byte("pw"), h, testArgon2); !ok || err != nil {
+		t.Errorf("hash at exactly the limits: %v, %v", ok, err)
+	}
+	for _, f := range []func(*Argon2Params){
+		func(p *Argon2Params) { p.Iterations = 0 },
+		func(p *Argon2Params) { p.Parallelism = 0 },
+		func(p *Argon2Params) { p.SaltLength = 0 },
+		func(p *Argon2Params) { p.KeyLength = 0 },
+	} {
+		l := testArgon2
+		f(&l)
+		if _, err := VerifyPasswordWithLimits([]byte("pw"), h, l); !errors.Is(err, ErrInvalidHash) {
+			t.Errorf("limit %+v: err = %v; want ErrInvalidHash", l, err)
+		}
+	}
+}
+
 func TestArgon2ParamsValidate(t *testing.T) {
 	if err := DefaultArgon2Params().Validate(); err != nil {
 		t.Fatalf("defaults invalid: %v", err)

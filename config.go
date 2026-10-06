@@ -22,6 +22,10 @@ import (
 type Config struct {
 	// Argon2 sets the cost of newly created password hashes.
 	Argon2 Argon2Params `mapstructure:"argon2"`
+	// Argon2Limits caps the parameters accepted from stored hashes, so a
+	// corrupt or tampered hash cannot exhaust memory or CPU. Hashes over the
+	// limits fail with [ErrInvalidHash]. Argon2 must be within these limits.
+	Argon2Limits Argon2Params `mapstructure:"argon2_limits"`
 	// MaxConcurrentHashes caps how many Argon2 computations run at once, which
 	// bounds memory use to roughly MaxConcurrentHashes * Argon2.MemoryKiB. The
 	// default is the number of CPUs divided by the default parallelism (at
@@ -78,6 +82,7 @@ func DefaultConfig() Config {
 	argon := DefaultArgon2Params()
 	return Config{
 		Argon2:              argon,
+		Argon2Limits:        DefaultArgon2Limits(),
 		MaxConcurrentHashes: max(1, runtime.NumCPU()/int(argon.Parallelism)),
 		AccessTokenTTL:      15 * time.Minute,
 		RefreshTokenTTL:     7 * 24 * time.Hour,
@@ -93,6 +98,8 @@ func (c Config) Validate() error {
 	var errs []error
 	if err := c.Argon2.Validate(); err != nil {
 		errs = append(errs, err)
+	} else if err := c.Argon2.within(c.Argon2Limits); err != nil {
+		errs = append(errs, fmt.Errorf("auth: Argon2 is outside Argon2Limits: %w", err))
 	}
 	if c.MaxConcurrentHashes < 1 {
 		errs = append(errs, errors.New("auth: MaxConcurrentHashes must be at least 1"))
@@ -178,6 +185,11 @@ func WithClaimsProvider(p ClaimsProvider) Option {
 // WithArgon2Params sets the cost of newly created password hashes.
 func WithArgon2Params(p Argon2Params) Option {
 	return func(s *settings) { s.Argon2 = p }
+}
+
+// WithArgon2Limits sets [Config.Argon2Limits].
+func WithArgon2Limits(p Argon2Params) Option {
+	return func(s *settings) { s.Argon2Limits = p }
 }
 
 // WithMaxConcurrentHashes sets [Config.MaxConcurrentHashes].

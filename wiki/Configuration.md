@@ -16,6 +16,11 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 | `Argon2.Parallelism` | `argon2.parallelism` | `4` | Lanes (threads) per hash. |
 | `Argon2.SaltLength` | `argon2.salt_length` | `16` | Salt length in bytes. Minimum 8. |
 | `Argon2.KeyLength` | `argon2.key_length` | `32` | Hash output length in bytes. Minimum 16. |
+| `Argon2Limits.MemoryKiB` | `argon2_limits.memory_kib` | `1048576` (1 GiB) | Largest memory cost accepted from a **stored** hash. |
+| `Argon2Limits.Iterations` | `argon2_limits.iterations` | `16` | Largest iteration count accepted from a stored hash. |
+| `Argon2Limits.Parallelism` | `argon2_limits.parallelism` | `255` | Largest lane count accepted from a stored hash. |
+| `Argon2Limits.SaltLength` | `argon2_limits.salt_length` | `64` | Longest salt accepted from a stored hash, in bytes. |
+| `Argon2Limits.KeyLength` | `argon2_limits.key_length` | `128` | Longest hash accepted from a stored hash, in bytes. |
 | `MaxConcurrentHashes` | `max_concurrent_hashes` | `max(1, runtime.NumCPU() / 4)` | Maximum number of Argon2 computations at once. Extra callers wait or give up when their `ctx` is cancelled. Peak hashing memory is about this × `MemoryKiB`. Must be ≥ 1. |
 | `AccessTokenTTL` | `access_token_ttl` | `15m` | Lifetime of access tokens. Must be at least 1s, because token timestamps have one-second resolution. |
 | `RefreshTokenTTL` | `refresh_token_ttl` | `168h` (7 days) | Lifetime of each refresh token. Each refresh issues a new one, so a session lasts as long as it is refreshed at least this often. Must be at least 1s. |
@@ -24,11 +29,11 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 | `KeyCacheTTL` | `key_cache_ttl` | `5m` | How often each instance reloads its in-memory copy of the key set from the `KeyStore` with `ListKeys`. Unknown key IDs also trigger a reload, at most once per second. A key deleted from the store can keep working for up to this long. `0` reloads on every verification of another instance's token, still at most once per second. Must be ≥ 0. |
 | `Issuer` | `issuer` | `""` | If set, written to `iss` and required on verification. |
 | `Audience` | `audience` | `nil` | If set, written to `aud`. Verification requires the token's `aud` to contain at least one of these values. |
-| `Leeway` | `leeway` | `0` | Allowed clock skew when checking `exp` and `iat`. Must be ≥ 0. |
+| `Leeway` | `leeway` | `0` | Allowed clock skew when checking `exp` and `iat`. It also extends retention: refresh-token records (`ExpiresAt` = `exp` + `Leeway`) and signing keys are kept long enough to cover tokens accepted during the leeway window. Must be ≥ 0. |
 | `AuthHeader` | `auth_header` | `"Authorization"` | Request header that carries `Bearer <token>`. `""` turns header authentication off. |
 | `AuthCookie` | `auth_cookie` | `""` | Cookie that carries a raw access token. `""` turns cookie authentication off. If both are on, the header wins. |
 
-`Argon2Params.Validate` also requires `Iterations ≥ 1`, `Parallelism ≥ 1`, and `MemoryKiB ≥ 8 × Parallelism`.
+`Argon2Params.Validate` also requires `Iterations ≥ 1`, `Parallelism ≥ 1`, and `MemoryKiB ≥ 8 × Parallelism`. `Config.Validate` additionally requires every `Argon2` field to be ≤ the matching `Argon2Limits` field, so new hashes always pass verification. `Argon2Limits` exists so that a corrupt or tampered stored hash cannot force a huge computation. Hashes over the limits fail with `ErrInvalidHash` without being computed. See [Security](Security.md#verification-limits).
 
 ## Options
 
@@ -36,6 +41,7 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 |---|---|
 | `WithConfig(cfg Config)` | Replaces **all** plain-data settings with `cfg`. |
 | `WithArgon2Params(p Argon2Params)` | Sets `Config.Argon2`. |
+| `WithArgon2Limits(p Argon2Params)` | Sets `Config.Argon2Limits`. |
 | `WithMaxConcurrentHashes(n int)` | Sets `Config.MaxConcurrentHashes`. |
 | `WithAccessTokenTTL(d)` | Sets `Config.AccessTokenTTL`. |
 | `WithRefreshTokenTTL(d)` | Sets `Config.RefreshTokenTTL`. |
@@ -130,6 +136,12 @@ auth:
     parallelism: 4
     salt_length: 16
     key_length: 32
+  argon2_limits:               # caps on parameters read from stored hashes
+    memory_kib: 1048576
+    iterations: 16
+    parallelism: 255
+    salt_length: 64
+    key_length: 128
   max_concurrent_hashes: 8
   access_token_ttl: 15m
   refresh_token_ttl: 168h      # Go durations have no "d" unit

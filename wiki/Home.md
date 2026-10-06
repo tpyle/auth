@@ -8,7 +8,7 @@ import "github.com/tpyle/auth/v2"
 
 ## Features
 
-- **Argon2id password hashing** in the standard PHC string format (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`). Cost parameters live inside each hash, so changing them never locks anyone out. Outdated hashes are upgraded automatically on login.
+- **Argon2id password hashing** in the standard PHC string format (`$argon2id$v=19$m=...,t=...,p=...$salt$hash`). Cost parameters live inside each hash, so changing them never locks anyone out. Outdated hashes are upgraded automatically on login. Stored hashes with absurd parameters are rejected before any work is done, so a corrupt hash cannot exhaust memory or CPU.
 - **Login timing equalization.** Unknown users are checked against a dummy hash, so they take about as long to reject as a wrong password.
 - **Bounded hashing memory.** A semaphore caps concurrent Argon2 computations.
 - **ES256 (P-256 ECDSA) JWTs** for access tokens and refresh tokens. Each kind is rejected where the other is expected.

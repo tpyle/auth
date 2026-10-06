@@ -49,6 +49,37 @@ func DefaultArgon2Params() Argon2Params {
 	}
 }
 
+// DefaultArgon2Limits returns the upper bounds [VerifyPassword] accepts for
+// a stored hash: 1 GiB of memory, 16 iterations, 255 lanes, a 64-byte salt
+// and a 128-byte hash. These are far above any sensible configuration but
+// stop a corrupt or malicious hash from exhausting memory or CPU.
+func DefaultArgon2Limits() Argon2Params {
+	return Argon2Params{
+		MemoryKiB:   1 << 20,
+		Iterations:  16,
+		Parallelism: 255,
+		SaltLength:  64,
+		KeyLength:   128,
+	}
+}
+
+// within reports an error if any field of p exceeds the same field of limits.
+func (p Argon2Params) within(limits Argon2Params) error {
+	switch {
+	case p.MemoryKiB > limits.MemoryKiB:
+		return fmt.Errorf("argon2 memory %d KiB exceeds limit %d KiB", p.MemoryKiB, limits.MemoryKiB)
+	case p.Iterations > limits.Iterations:
+		return fmt.Errorf("argon2 iterations %d exceed limit %d", p.Iterations, limits.Iterations)
+	case p.Parallelism > limits.Parallelism:
+		return fmt.Errorf("argon2 parallelism %d exceeds limit %d", p.Parallelism, limits.Parallelism)
+	case p.SaltLength > limits.SaltLength:
+		return fmt.Errorf("argon2 salt length %d exceeds limit %d", p.SaltLength, limits.SaltLength)
+	case p.KeyLength > limits.KeyLength:
+		return fmt.Errorf("argon2 key length %d exceeds limit %d", p.KeyLength, limits.KeyLength)
+	}
+	return nil
+}
+
 // Validate reports whether p is usable. Memory must be at least
 // 8 KiB per lane, the salt at least 8 bytes and the hash at least 16 bytes.
 func (p Argon2Params) Validate() error {
@@ -86,12 +117,23 @@ func HashPassword(password []byte, p Argon2Params) (string, error) {
 
 // VerifyPassword reports whether password matches the PHC-encoded Argon2id
 // hash. The comparison is constant-time. The cost parameters are read from the
-// hash, not from the current configuration. A malformed hash returns an error
-// wrapping [ErrInvalidHash].
+// hash, not from the current configuration, and must not exceed
+// [DefaultArgon2Limits]. A malformed hash returns an error wrapping
+// [ErrInvalidHash].
 func VerifyPassword(password []byte, encodedHash string) (bool, error) {
+	return VerifyPasswordWithLimits(password, encodedHash, DefaultArgon2Limits())
+}
+
+// VerifyPasswordWithLimits is like [VerifyPassword] but rejects hashes whose
+// parameters exceed limits instead of [DefaultArgon2Limits]. Hashes over the
+// limits return an error wrapping [ErrInvalidHash] without being computed.
+func VerifyPasswordWithLimits(password []byte, encodedHash string, limits Argon2Params) (bool, error) {
 	p, salt, hash, err := decodePHC(encodedHash)
 	if err != nil {
 		return false, err
+	}
+	if err := p.within(limits); err != nil {
+		return false, fmt.Errorf("%w: %w", ErrInvalidHash, err)
 	}
 	computed := argon2.IDKey(password, salt, p.Iterations, p.MemoryKiB, p.Parallelism, p.KeyLength)
 	return subtle.ConstantTimeCompare(hash, computed) == 1, nil

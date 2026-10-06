@@ -98,7 +98,7 @@ func (km *keyManager) generate(ctx context.Context, activatesAt time.Time) (*sig
 	var signUntil time.Time
 	if km.s.KeyRotationInterval > 0 {
 		signUntil = activatesAt.Add(km.s.KeyRotationInterval)
-		vk.ExpiresAt = signUntil.Add(km.s.maxTokenTTL() + keyRetentionMargin)
+		vk.ExpiresAt = signUntil.Add(km.s.maxTokenTTL() + keyRetentionMargin + km.s.Leeway)
 	}
 	if err := km.s.keyStore.StoreKey(ctx, vk); err != nil {
 		return nil, fmt.Errorf("auth: storing signing key: %w", err)
@@ -186,7 +186,7 @@ func (km *keyManager) cleanup(ctx context.Context) error {
 
 	var expired []uuid.UUID
 	for _, k := range keys {
-		if !keep[k.ID] && k.expired(now) {
+		if k != nil && !keep[k.ID] && k.expired(now) {
 			expired = append(expired, k.ID)
 		}
 	}

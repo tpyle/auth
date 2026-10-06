@@ -63,7 +63,7 @@ The package manages `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `typ` and `
 
 `Extra` values are decoded from JSON, so numbers are `float64`, arrays are `[]any`, and objects are `map[string]any`. `claims.GetString(name)` is a shortcut for string-valued extras.
 
-Verification checks: the signature (ES256 only), that `kid` is a known and unexpired key, `exp` (required), `iat` (it must not be in the future), `iss` and `aud` when configured, the `typ` claim, and that `sub`, `jti` and `typ` are present. `Leeway` applies to the time checks.
+Verification checks: the signature (ES256 only), that `kid` is a known and unexpired key, `exp` (required), `iat` (it must not be in the future), `iss` and `aud` when configured, the `typ` claim, and that `sub`, `jti` and `typ` are present. `Leeway` applies to the time checks. A token of the wrong type is rejected with `ErrInvalidToken` even if it has also expired. For example, an expired refresh token passed to `VerifyAccessToken` gives `ErrInvalidToken`, not `ErrTokenExpired`.
 
 ## Refresh rotation
 
@@ -118,9 +118,13 @@ Reuse detection depends on used records staying in the store until they expire. 
 
 `Logout(ctx, refreshToken)`:
 
-- verifies the refresh token's signature, `typ`, issuer and audience, but **accepts expired tokens**, so a client can always log out cleanly.
+- verifies the refresh token's signature, `typ`, issuer and audience.
 - revokes the token's whole family, which includes refresh tokens issued later from it.
 - is idempotent. Logging out an already-revoked session returns nil.
+
+**Pass the most recent refresh token.** Expired tokens are accepted as long as their signature can still be checked. That is **guaranteed until the token's `exp` + `Leeway`**. After that, its signing key may be retired, and `Logout` returns `ErrInvalidToken`. A client holding the latest refresh token can therefore always log out while that token could still be used.
+
+An **older** refresh token from a session that has since been refreshed can pass that point while the session is still active, because the session lives on through newer tokens. Logging out with such a token may then fail with `ErrInvalidToken` and leave the session running. To end every session regardless of which tokens the client still has, use [`RevokeAllSessions`](#revoking-all-sessions).
 
 Logout does **not** invalidate access tokens already issued. They are stateless and stay valid until `exp`. That is why `AccessTokenTTL` should be short. If you need immediate revocation of access tokens, keep a denylist of `jti` values in your own middleware.
 
@@ -135,6 +139,8 @@ if err := a.RevokeAllSessions(ctx, username); err != nil {
 pair, err := a.IssueTokenPair(ctx, username, nil) // new session for this device
 ```
 
+- A login that creates its session at the same moment is either revoked too, or creates its session after the call completes. The store contract requires this ([Storage](Storage.md#refreshtokenstore)). A session created after the call completes is a new session and is not affected.
+- **For a password change, change the password first, then call `RevokeAllSessions`.** In the reverse order, any login with the old password between the two calls would create a valid new session. In this order, only a login whose password check came before the change and whose session creation came after the revocation can survive. The library cannot tie sessions to password versions. See [Security](Security.md#recommendations).
 - It returns `ErrNotConfigured` without a `RefreshTokenStore`, and an error for an empty subject. A subject with no sessions is not an error.
 - Access tokens already issued stay valid until they expire.
 - A refresh that is in flight when you revoke fails with `ErrTokenRevoked`, or its new refresh token is deleted by the revocation (see [Revocation is final](#revocation-is-final)). It cannot keep the session alive.
@@ -156,10 +162,10 @@ If no next key exists at rotation time (because storing it kept failing), or the
 Each key's `ExpiresAt` is set when the key is created:
 
 ```
-ExpiresAt = activation time + KeyRotationInterval + max(AccessTokenTTL, RefreshTokenTTL) + 5 minutes
+ExpiresAt = activation time + KeyRotationInterval + max(AccessTokenTTL, RefreshTokenTTL) + 5 minutes + Leeway
 ```
 
-A key signs for at most one rotation interval after it is activated. The last token it signs can live for the longest token TTL. The 5-minute margin covers small delays in rotation. With the defaults, that is 24h + 168h + 5m = 192h5m after activation. A next key is created one interval before it activates, so it is kept one interval longer than a key created on the spot.
+A key signs for at most one rotation interval after it is activated (its signing window). The last token it signs can live for the longest token TTL, and it is accepted for `Leeway` past its `exp`. The 5-minute margin covers small delays in rotation. With the defaults (`Leeway` = 0), that is 24h + 168h + 5m = 192h5m after activation. A next key is created one interval before it activates, so it is kept one interval longer than a key created on the spot.
 
 - **The current and next keys are never deleted** by cleanup, even if they have passed their `ExpiresAt`.
 - **A key past its `ExpiresAt` is rejected** during verification even if it is still in the store, so cleanup timing does not affect correctness.
@@ -199,7 +205,7 @@ Give every instance the **same `KeyStore`** (and the same `RefreshTokenStore`, a
 - Each instance has its own signing keys, and they rotate independently.
 - Any instance verifies any other instance's tokens through its copy of the shared key set.
 - Any instance may delete any expired key. `DeleteKeys` must ignore missing IDs because instances race on this.
-- The store holds about `instances × (2 + (KeyRotationInterval + max TTL + 5m) / KeyRotationInterval)` unexpired keys. With the defaults that is about 10 per instance, plus two per restart.
+- The store holds about `instances × (2 + (KeyRotationInterval + max TTL + 5m + Leeway) / KeyRotationInterval)` unexpired keys. With the defaults that is about 10 per instance, plus two per restart.
 
 With the default private `MemoryKeyStore`, instances **cannot** verify each other's tokens.
 

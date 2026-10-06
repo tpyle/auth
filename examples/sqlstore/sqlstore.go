@@ -126,12 +126,22 @@ func (s *Store) DeleteKeys(ctx context.Context, ids []uuid.UUID) error {
 
 // CreateRefreshToken implements auth.RefreshTokenStore.
 //
-// The upsert locks the family row for the rest of the transaction. Revocation
-// updates the same row, so the two serialize: either revocation commits first
-// and this sees revoked = TRUE, or this commits first and revocation's DELETE
-// (a later statement, with a fresh snapshot) removes the new token.
+// Two locks make this atomic with revocation, both held until commit:
+//   - A shared advisory lock on the subject, which RevokeRefreshTokensForSubject
+//     takes exclusively. This covers a brand-new family, which has no row for
+//     revocation to lock yet.
+//   - The family row, locked by the upsert, which RevokeRefreshTokenFamily
+//     updates.
+//
+// Either revocation commits first and this sees revoked = TRUE (or, for a new
+// family, starts after revocation, as a later login), or this commits first
+// and revocation's later statements, with fresh snapshots, revoke the new
+// token. Locks are always taken subject first, then family.
 func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, r.Subject); err != nil {
+			return err
+		}
 		var revoked bool
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)
@@ -197,6 +207,11 @@ func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID
 // RevokeRefreshTokensForSubject implements auth.RefreshTokenStore.
 func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		// Waits for in-flight CreateRefreshToken calls for this subject,
+		// including ones starting new families; see CreateRefreshToken.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, subject); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE refresh_families SET revoked = TRUE WHERE subject = $1`, subject); err != nil {
 			return err
 		}

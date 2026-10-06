@@ -46,6 +46,18 @@ func TestAuthenticate(t *testing.T) {
 	}
 }
 
+func TestAuthenticateRejectsHashOverLimits(t *testing.T) {
+	users := NewMemoryUserStore()
+	big := testArgon2
+	big.MemoryKiB = 1024
+	h, _ := HashPassword([]byte("pw"), big)
+	users.SetPasswordHash("bob", h)
+	a := newTestAuthorizer(t, WithUserStore(users), WithArgon2Limits(testArgon2))
+	if err := a.Authenticate(context.Background(), "bob", []byte("pw")); !errors.Is(err, ErrInvalidHash) {
+		t.Errorf("err = %v; want ErrInvalidHash", err)
+	}
+}
+
 func TestAuthenticateStoreFailure(t *testing.T) {
 	a := newTestAuthorizer(t, WithUserStore(userStoreFunc(func(context.Context, string) (string, error) {
 		return "", errTest
@@ -368,6 +380,50 @@ func TestVerifyAccessTokenExpiry(t *testing.T) {
 	}
 	if _, err := lenient.VerifyAccessToken(ctx, tok); err != nil {
 		t.Errorf("leeway not applied: %v", err)
+	}
+}
+
+// The wrong kind of token is invalid even when it has also expired.
+func TestExpiredTokenOfWrongType(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now))
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	clock.Advance(30 * 24 * time.Hour)
+	if _, err := a.VerifyAccessToken(ctx, pair.RefreshToken); !errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrTokenExpired) {
+		t.Errorf("expired refresh token as access: err = %v; want only ErrInvalidToken", err)
+	}
+	if _, err := a.Refresh(ctx, pair.AccessToken); !errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrTokenExpired) {
+		t.Errorf("expired access token to Refresh: err = %v; want only ErrInvalidToken", err)
+	}
+	if _, err := a.VerifyAccessToken(ctx, pair.AccessToken); !errors.Is(err, ErrTokenExpired) {
+		t.Errorf("expired access token: err = %v; want ErrTokenExpired", err)
+	}
+}
+
+// Tokens are accepted until exp + Leeway, so their records and signing keys
+// must be retained that long.
+func TestLeewayRetention(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	store := NewMemoryRefreshTokenStore()
+	store.now = clock.Now
+	keys := NewMemoryKeyStore()
+	a := newRefreshAuthorizer(t, store, WithClock(clock.Now), WithKeyStore(keys),
+		WithLeeway(time.Minute), WithRefreshTokenTTL(time.Hour), WithKeyRotationInterval(time.Hour))
+
+	cur := storedKey(t, keys, a.keys.current.Load().id)
+	if want := clock.Now().Add(time.Hour + time.Hour + keyRetentionMargin + time.Minute); !cur.ExpiresAt.Equal(want) {
+		t.Errorf("key ExpiresAt = %v; want %v", cur.ExpiresAt, want)
+	}
+
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	clock.Advance(time.Hour + 30*time.Second)                      // expired, but within leeway
+	if _, err := a.IssueTokenPair(ctx, "carol", nil); err != nil { // triggers a purge
+		t.Fatal(err)
+	}
+	if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
+		t.Errorf("refresh within leeway after purge: %v", err)
 	}
 }
 

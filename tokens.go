@@ -163,11 +163,13 @@ func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family uu
 	now := a.s.now()
 	exp := now.Add(a.s.RefreshTokenTTL)
 	rec := RefreshTokenRecord{
-		ID:        uuid.New(),
-		FamilyID:  family,
-		Subject:   subject,
-		IssuedAt:  now,
-		ExpiresAt: exp,
+		ID:       uuid.New(),
+		FamilyID: family,
+		Subject:  subject,
+		IssuedAt: now,
+		// The parser accepts the token until exp + Leeway, so the record
+		// must survive that long.
+		ExpiresAt: exp.Add(a.s.Leeway),
 	}
 	if err := a.s.refreshStore.CreateRefreshToken(ctx, rec); err != nil {
 		return "", time.Time{}, fmt.Errorf("auth: storing refresh token: %w", err)
@@ -229,21 +231,24 @@ func (a *Authorizer) parse(ctx context.Context, tokenString string, want TokenTy
 	case internalErr != nil:
 		return nil, internalErr
 	case errors.Is(err, jwt.ErrTokenExpired):
+		// The signature was verified before expiry was checked, so the
+		// type can be trusted: a token of the wrong kind is invalid, not
+		// merely expired.
+		if typeErr := checkTokenType(tok, want); typeErr != nil {
+			return nil, typeErr
+		}
 		return nil, fmt.Errorf("%w: %w", ErrTokenExpired, err)
 	case err != nil:
 		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, err)
 	}
 
-	if h, _ := tok.Header["typ"].(string); h != headerType(want) {
-		return nil, fmt.Errorf("%w: expected %s header type, got %q", ErrInvalidToken, headerType(want), h)
+	if err := checkTokenType(tok, want); err != nil {
+		return nil, err
 	}
 	mc := tok.Claims.(jwt.MapClaims)
 	c, err := claimsFromMap(mc)
 	if err != nil {
 		return nil, err
-	}
-	if c.Type != want {
-		return nil, fmt.Errorf("%w: expected %s token, got %q", ErrInvalidToken, want, c.Type)
 	}
 	if !validateTimes {
 		// The lenient parser skips all claim validation, so check these here.
@@ -255,6 +260,19 @@ func (a *Authorizer) parse(ctx context.Context, tokenString string, want TokenTy
 		}
 	}
 	return c, nil
+}
+
+// checkTokenType verifies that both the "typ" header and the "typ" claim
+// match want.
+func checkTokenType(tok *jwt.Token, want TokenType) error {
+	if h, _ := tok.Header["typ"].(string); h != headerType(want) {
+		return fmt.Errorf("%w: expected %s header type, got %q", ErrInvalidToken, headerType(want), h)
+	}
+	mc, _ := tok.Claims.(jwt.MapClaims)
+	if typ, _ := mc[claimType].(string); typ != string(want) {
+		return fmt.Errorf("%w: expected %s token, got %q", ErrInvalidToken, want, typ)
+	}
+	return nil
 }
 
 func claimsFromMap(mc jwt.MapClaims) (*Claims, error) {

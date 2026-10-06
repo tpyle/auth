@@ -137,7 +137,7 @@ if err := a.Logout(ctx, pair.RefreshToken); err != nil {
 }
 ```
 
-`Logout` revokes the session that the refresh token belongs to. It accepts expired refresh tokens, and logging out twice is not an error. Access tokens already issued stay valid until they expire, so keep `AccessTokenTTL` short.
+`Logout` revokes the session that the refresh token belongs to. Pass the client's most recent refresh token. Expired refresh tokens are accepted at least until `exp` + `Leeway` (see [Logout](Tokens-and-Keys.md#logout)), and logging out twice is not an error. Access tokens already issued stay valid until they expire, so keep `AccessTokenTTL` short.
 
 To end **every** session of a user, for example after a password change, call `RevokeAllSessions`. To keep the current device signed in, issue it a new pair:
 

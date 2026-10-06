@@ -68,7 +68,7 @@ Pass them with `WithKeyStore(...)` and `WithRefreshTokenStore(...)`.
 | `WithAuthCookie(*string)` (`nil` = off) | `WithAuthCookie(string)` (`""` = off) |
 | `WithViper(v)`, `WithViperPrefix(v, prefix)` | `cfg := auth.DefaultConfig(); v.UnmarshalKey("auth", &cfg)` then `WithConfig(cfg)` |
 
-New in v2: `WithMaxConcurrentHashes`, `WithRefreshReuseGrace`, `WithKeyCacheTTL`, `WithIssuer`, `WithAudience`, `WithLeeway`, `WithClaimsProvider`, `WithUnauthorizedHandler`, `WithLogger`, `WithClock`.
+New in v2: `WithArgon2Limits`, `WithMaxConcurrentHashes`, `WithRefreshReuseGrace`, `WithKeyCacheTTL`, `WithIssuer`, `WithAudience`, `WithLeeway`, `WithClaimsProvider`, `WithUnauthorizedHandler`, `WithLogger`, `WithClock`.
 
 Viper keys changed:
 
@@ -123,7 +123,7 @@ Other differences:
 
 ### Password hashes: no migration needed
 
-Existing v1 hashes are standard Argon2id PHC strings and **stay valid**. v1's defaults produced `$argon2id$v=19$m=131072,t=4,p=4$...`. v2 verifies these using the parameters inside the hash. Because they differ from v2's defaults (`m=65536,t=3,p=4`), they are **rehashed transparently** on each user's next successful login, provided your `UserStore` implements `PasswordHashUpdater`. Without it, the old hashes keep working but are never upgraded.
+Existing v1 hashes are standard Argon2id PHC strings and **stay valid**. v1's defaults produced `$argon2id$v=19$m=131072,t=4,p=4$...`. v2 verifies these using the parameters inside the hash. They are well within the default verification limits (`DefaultArgon2Limits()`: 1 GiB, 16 iterations, 255 lanes). If you lower `Argon2Limits`, keep them at or above the v1 parameters until all hashes are upgraded. Because they differ from v2's defaults (`m=65536,t=3,p=4`), they are **rehashed transparently** on each user's next successful login, provided your `UserStore` implements `PasswordHashUpdater`. Without it, the old hashes keep working but are never upgraded.
 
 If you want to keep v1's cost, configure it explicitly:
 

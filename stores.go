@@ -104,8 +104,8 @@ type RefreshTokenRecord struct {
 	Subject string
 	// IssuedAt is when the token was created.
 	IssuedAt time.Time
-	// ExpiresAt is when the token expires. Stores may delete records after
-	// this time.
+	// ExpiresAt is when the token can no longer be accepted: its "exp"
+	// claim plus [Config.Leeway]. Stores may delete records after this time.
 	ExpiresAt time.Time
 	// UsedAt is when the token was first exchanged for a new one. The zero
 	// value means it has not been used.
@@ -150,7 +150,9 @@ type RefreshTokenStore interface {
 	// records. Revoking an unknown family is not an error.
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
 	// RevokeRefreshTokensForSubject revokes, as RevokeRefreshTokenFamily
-	// does, every family belonging to subject. Revoking a subject with no
-	// families is not an error.
+	// does, every family belonging to subject. It must also be atomic with
+	// respect to CreateRefreshToken calls that start a new family for the
+	// subject: such a token is either revoked or created after this call
+	// completes. Revoking a subject with no families is not an error.
 	RevokeRefreshTokensForSubject(ctx context.Context, subject string) error
 }

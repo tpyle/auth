@@ -17,6 +17,7 @@ func TestDefaultConfigIsValid(t *testing.T) {
 func TestConfigValidate(t *testing.T) {
 	tests := map[string]func(*Config){
 		"argon2":                func(c *Config) { c.Argon2.Iterations = 0 },
+		"argon2 over limits":    func(c *Config) { c.Argon2Limits.MemoryKiB = c.Argon2.MemoryKiB - 1 },
 		"max hashes":            func(c *Config) { c.MaxConcurrentHashes = 0 },
 		"access ttl":            func(c *Config) { c.AccessTokenTTL = 0 },
 		"refresh ttl":           func(c *Config) { c.RefreshTokenTTL = -time.Second },
@@ -83,6 +84,7 @@ func TestOptions(t *testing.T) {
 		WithRefreshTokenStore(refresh),
 		WithClaimsProvider(provider),
 		WithArgon2Params(testArgon2),
+		WithArgon2Limits(testArgon2),
 		WithMaxConcurrentHashes(3),
 		WithAccessTokenTTL(time.Minute),
 		WithRefreshTokenTTL(time.Hour),
@@ -103,6 +105,7 @@ func TestOptions(t *testing.T) {
 	}
 	want := Config{
 		Argon2:              testArgon2,
+		Argon2Limits:        testArgon2,
 		MaxConcurrentHashes: 3,
 		AccessTokenTTL:      time.Minute,
 		RefreshTokenTTL:     time.Hour,

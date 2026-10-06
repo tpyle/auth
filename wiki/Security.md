@@ -16,6 +16,23 @@
 
 Hashes are stored as PHC strings, `$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>`, with unpadded standard base64. `VerifyPassword` reads the cost parameters **from the hash**, not from the config, and compares in constant time. Only Argon2id version 19 is accepted.
 
+### Verification limits
+
+Because the cost parameters come from the stored hash, a corrupt or tampered hash (for example `m=4294967295`) could otherwise make a single login allocate gigabytes of memory or run for minutes. To prevent this, every hash is checked against **limits** before it is computed. A hash whose parameters exceed them fails with `ErrInvalidHash`, and no Argon2 work is done.
+
+| Limit | `DefaultArgon2Limits()` |
+|---|---|
+| `MemoryKiB` | 1 GiB (`1 << 20`) |
+| `Iterations` | 16 |
+| `Parallelism` | 255 |
+| `SaltLength` | 64 bytes |
+| `KeyLength` | 128 bytes |
+
+- `VerifyPassword` uses `DefaultArgon2Limits()`. `VerifyPasswordWithLimits(password, hash, limits)` takes explicit limits.
+- `Authenticate` and `Login` use `Config.Argon2Limits` (default `DefaultArgon2Limits()`, option `WithArgon2Limits`).
+- `New` rejects a config whose `Argon2` parameters exceed `Argon2Limits` in any field, so you can never create hashes you would refuse to verify.
+- The defaults are far above any sensible setting. v1's `m=131072,t=4,p=4` hashes are well within them. Lowering the limits to just above the parameters you have actually used tightens the bound on per-login cost.
+
 If you raise the cost, measure first: one login should take a few hundred milliseconds at most on your hardware.
 
 ### Memory sizing
@@ -26,7 +43,7 @@ Each running hash allocates `MemoryKiB` of memory. `MaxConcurrentHashes` (defaul
 MaxConcurrentHashes × MemoryKiB
 ```
 
-With the defaults on an 8-core machine, that is 2 × 64 MiB = 128 MiB. Set `MaxConcurrentHashes` so this fits within your container's memory limit, with room left for everything else. Requests beyond the cap wait for a slot (and give up when their `ctx` is cancelled), so a flood of login requests causes queueing instead of running out of memory. Each hash uses `Parallelism` threads, so the default cap keeps the CPU fully used without oversubscribing it.
+Verifying an older stored hash uses that hash's own `MemoryKiB`, which may be larger than the current setting but never larger than `Argon2Limits.MemoryKiB`. Size for the largest `MemoryKiB` among your stored hashes. With the defaults on an 8-core machine, that is 2 × 64 MiB = 128 MiB. Set `MaxConcurrentHashes` so this fits within your container's memory limit, with room left for everything else. Requests beyond the cap wait for a slot (and give up when their `ctx` is cancelled), so a flood of login requests causes queueing instead of running out of memory. Each hash uses `Parallelism` threads, so the default cap keeps the CPU fully used without oversubscribing it.
 
 `MaxConcurrentHashes` applies to `Authorizer.HashPassword`, `Authenticate` and `Login`. The package-level `HashPassword`/`VerifyPassword` functions ignore it.
 
@@ -74,6 +91,6 @@ With these set, tokens must carry a matching `iss` and an `aud` that includes on
   - Mobile/desktop: the platform keystore (iOS Keychain, Android Keystore).
   - Always replace the stored refresh token with the new one from each refresh. If you run with `RefreshReuseGrace = 0`, also allow only one refresh in flight at a time. See [reuse detection](Tokens-and-Keys.md#reuse-detection).
 - **Treat `ErrRefreshTokenReused` as a security signal.** Log it with the subject and alert on spikes.
-- **End all sessions after a password change or account disable** with `RevokeAllSessions(ctx, subject)`, then issue a new pair for the current device with `IssueTokenPair`. Access tokens already issued stay valid until they expire. See [Tokens and Keys](Tokens-and-Keys.md#revoking-all-sessions).
+- **End all sessions after a password change or account disable** with `RevokeAllSessions(ctx, subject)`, then issue a new pair for the current device with `IssueTokenPair`. Access tokens already issued stay valid until they expire. One gap remains: a login whose password check passed **before** the password change, but which creates its session **after** `RevokeAllSessions` completes, gets a new, valid session. The library cannot tie sessions to password versions. Always save the new password hash **first** and call `RevokeAllSessions` **afterwards**. In the reverse order, any login with the old password between the two calls would survive. In this order, a login survives only if its password check came before the change and its session creation came after the revocation. That requires the login's own short check-to-create step to span both calls. See [Tokens and Keys](Tokens-and-Keys.md#revoking-all-sessions).
 - **External verifiers** must check the `at+jwt` header type (or `typ == "access"` in the payload). See [JWKS](Tokens-and-Keys.md#jwks).
 - **Don't log tokens** or password inputs. Errors from this package never contain them.

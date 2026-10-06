@@ -24,7 +24,7 @@ type UserStore interface {
 - Return the PHC string produced by `HashPassword` / `Authorizer.HashPassword`.
 - If the user does not exist, return an error that **wraps `auth.ErrUserNotFound`**, e.g. `fmt.Errorf("%w: %s", auth.ErrUserNotFound, username)`. The `Authorizer` then checks a dummy hash, so the response takes as long as a wrong password, and returns `ErrInvalidCredentials`.
 - Any other error counts as an internal failure and is returned to the caller wrapped as `auth: looking up user: ...`. **Do not** return a generic "not found" error. It would become a 500 instead of a 401, and the fast response would reveal which usernames exist.
-- If a stored hash cannot be parsed, `Authenticate` returns an error wrapping `ErrInvalidHash`.
+- If a stored hash cannot be parsed, or its parameters exceed `Config.Argon2Limits`, `Authenticate` returns an error wrapping `ErrInvalidHash`.
 
 ### PasswordHashUpdater
 
@@ -88,7 +88,7 @@ type RefreshTokenRecord struct {
 	FamilyID  uuid.UUID // one per login session
 	Subject   string
 	IssuedAt  time.Time
-	ExpiresAt time.Time
+	ExpiresAt time.Time // token's exp + Config.Leeway: when it can no longer be accepted
 	UsedAt    time.Time // first use; zero = unused
 }
 
@@ -110,7 +110,7 @@ Contract:
   - If the token was already used, return the record with its existing `UsedAt`, and **never overwrite it**. The [reuse grace window](Tokens-and-Keys.md#grace-period) is measured from the first use, so overwriting it would let the window slide forward.
   - If the record does not exist, return an error **wrapping `auth.ErrRefreshTokenNotFound`**. `Refresh` turns that into `ErrTokenRevoked`.
 - `RevokeRefreshTokenFamily` **marks the family revoked** and deletes its records. An unknown family is not an error. `Logout` and reuse detection both call it.
-- `RevokeRefreshTokensForSubject` revokes every family of that subject in the same way. A subject with no families is not an error. `RevokeAllSessions` calls it.
+- `RevokeRefreshTokensForSubject` revokes every family of that subject in the same way. It must **also** be atomic with `CreateRefreshToken` calls that **start a new family** for the subject (logins). Such a token must either be revoked, or be created only after this call completes, in which case it counts as a new session. Locking existing family rows does not cover this, because a new family has no row yet. The SQL example uses a per-subject advisory lock. A subject with no families is not an error. `RevokeAllSessions` calls it.
 - Keep used records until they expire. Reuse detection works only while the spent record exists. If used records are deleted early, a replayed token gets `ErrTokenRevoked` and its family is **not** revoked.
 - Keep revoked families until all of their tokens have expired. After that they can be forgotten.
 
@@ -123,7 +123,7 @@ DELETE FROM refresh_families WHERE expires_at < now();  -- cascades to their tok
 DELETE FROM refresh_tokens   WHERE expires_at < now();
 ```
 
-This is safe. An expired refresh token is rejected by its `exp` claim before the store is consulted, so its record is no longer needed. A family's `expires_at` is the latest expiry of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. `MemoryRefreshTokenStore` purges expired records and families on every `CreateRefreshToken`.
+This is safe. A record's `ExpiresAt` is the token's `exp` **plus `Leeway`**, the moment the token can no longer be accepted, so after it the record is not needed. Purging on `ExpiresAt` keeps records, and the tombstones of revoked families, through the leeway window. A family's `expires_at` is the latest `ExpiresAt` of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. `MemoryRefreshTokenStore` purges expired records and families on every `CreateRefreshToken`.
 
 ## PostgreSQL
 
@@ -174,17 +174,32 @@ A complete implementation of all four interfaces lives in [`examples/sqlstore/sq
 
 The refresh-token methods rely on PostgreSQL's default **`READ COMMITTED`** isolation level. Under `REPEATABLE READ` or `SERIALIZABLE`, the races below end in serialization errors, which `Refresh` reports as internal errors. Two parts carry the concurrency guarantees.
 
-**Create vs. revoke.** `CreateRefreshToken` upserts the family row in a transaction, which locks that row. Revocation updates the same row before it deletes the tokens, so the two operations serialize:
+**Create vs. revoke.** `CreateRefreshToken` runs in a transaction that holds two locks until commit:
+
+- a **shared** advisory lock on the subject, which `RevokeRefreshTokensForSubject` takes **exclusively**. This covers a brand-new family (a login), which has no row yet for revocation to lock.
+- the family row, locked by the upsert, which `RevokeRefreshTokenFamily` updates.
+
+Locks are always taken subject first, then family, so the two cannot deadlock. Each create therefore serializes with any revocation that could affect it:
 
 ```go
 // CreateRefreshToken implements auth.RefreshTokenStore.
 //
-// The upsert locks the family row for the rest of the transaction. Revocation
-// updates the same row, so the two serialize: either revocation commits first
-// and this sees revoked = TRUE, or this commits first and revocation's DELETE
-// (a later statement, with a fresh snapshot) removes the new token.
+// Two locks make this atomic with revocation, both held until commit:
+//   - A shared advisory lock on the subject, which RevokeRefreshTokensForSubject
+//     takes exclusively. This covers a brand-new family, which has no row for
+//     revocation to lock yet.
+//   - The family row, locked by the upsert, which RevokeRefreshTokenFamily
+//     updates.
+//
+// Either revocation commits first and this sees revoked = TRUE (or, for a new
+// family, starts after revocation, as a later login), or this commits first
+// and revocation's later statements, with fresh snapshots, revoke the new
+// token. Locks are always taken subject first, then family.
 func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, r.Subject); err != nil {
+			return err
+		}
 		var revoked bool
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)
@@ -217,7 +232,25 @@ func (s *Store) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID
 }
 ```
 
-(`inTx` is a small helper in the example that commits if the function returns nil and rolls back otherwise. `RevokeRefreshTokensForSubject` is the same, keyed on `subject`.)
+```go
+// RevokeRefreshTokensForSubject implements auth.RefreshTokenStore.
+func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject string) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		// Waits for in-flight CreateRefreshToken calls for this subject,
+		// including ones starting new families; see CreateRefreshToken.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, subject); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE refresh_families SET revoked = TRUE WHERE subject = $1`, subject); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE subject = $1`, subject)
+		return err
+	})
+}
+```
+
+(`inTx` is a small helper in the example that commits if the function returns nil and rolls back otherwise.)
 
 **Atomic consume.** A conditional `UPDATE` claims the token only if `used_at IS NULL`. A concurrent caller blocks on the row lock, and PostgreSQL then re-checks the `WHERE` clause against the committed row, so exactly one caller wins. Everyone else falls back to a plain `SELECT`, which returns the already-used record (with its original `used_at`) or reports that it is missing:
 

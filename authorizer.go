@@ -131,7 +131,7 @@ func (a *Authorizer) verifyPassword(ctx context.Context, password []byte, encode
 		return false, err
 	}
 	defer a.releaseHashSlot()
-	return VerifyPassword(password, encodedHash)
+	return VerifyPasswordWithLimits(password, encodedHash, a.s.Argon2Limits)
 }
 
 // Authenticate checks username and password against the [UserStore]. It
@@ -289,8 +289,15 @@ func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (*TokenPa
 }
 
 // Logout revokes the session the refresh token belongs to, including any
-// refresh tokens issued from it. Expired tokens are accepted (their signature
-// is still checked), and logging out twice is not an error.
+// refresh tokens issued from it. Logging out twice is not an error.
+//
+// Pass the most recent refresh token. Expired tokens are accepted as long as
+// their signature can still be checked, which is guaranteed until the token's
+// expiry plus [Config.Leeway]; after that its signing key may be retired and
+// Logout returns [ErrInvalidToken]. An older refresh token from a
+// session that has since been refreshed can reach that point while the
+// session is still active; use [Authorizer.RevokeAllSessions] to end every
+// session regardless.
 func (a *Authorizer) Logout(ctx context.Context, refreshToken string) error {
 	if err := a.s.requireRefreshStore(); err != nil {
 		return err
