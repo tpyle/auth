@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -170,6 +171,27 @@ func TestVerifyPasswordLimits(t *testing.T) {
 		f(&l)
 		if _, err := VerifyPasswordWithLimits([]byte("pw"), h, l); !errors.Is(err, ErrInvalidHash) {
 			t.Errorf("limit %+v: err = %v; want ErrInvalidHash", l, err)
+		}
+	}
+}
+
+// A corrupt hash full of separators must not cause a large allocation.
+func TestDecodePHCBoundsSplitting(t *testing.T) {
+	for name, h := range map[string]string{
+		"dollars": strings.Repeat("$", 1<<20),
+		"commas":  "$argon2id$v=19$m=64" + strings.Repeat(",", 1<<20) + "$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA",
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := NeedsRehash(h, testArgon2)
+		runtime.ReadMemStats(&after)
+		if !errors.Is(err, ErrInvalidHash) {
+			t.Errorf("%s: err = %v; want ErrInvalidHash", name, err)
+		}
+		// Unbounded splitting would allocate ~16 MiB of string headers.
+		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<20 {
+			t.Errorf("%s: parsing allocated %d bytes", name, allocated)
 		}
 	}
 }

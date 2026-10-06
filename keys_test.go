@@ -53,6 +53,18 @@ func TestNewStoresCurrentAndNextKeys(t *testing.T) {
 	}
 }
 
+// Very large (but valid) durations must not overflow when summed into a
+// key's retention.
+func TestKeyRetentionDoesNotOverflow(t *testing.T) {
+	const year = 365 * 24 * time.Hour
+	keys := NewMemoryKeyStore()
+	a := newTestAuthorizer(t, WithKeyStore(keys), WithRefreshTokenTTL(200*year), WithLeeway(100*year))
+	k := storedKey(t, keys, a.keys.current.Load().id)
+	if want := k.CreatedAt.Add(200 * year).Add(100 * year); k.ExpiresAt.Before(want) {
+		t.Errorf("ExpiresAt = %v; want after %v", k.ExpiresAt, want)
+	}
+}
+
 func TestKeysNeverExpireWithoutRotation(t *testing.T) {
 	keys := NewMemoryKeyStore()
 	a := newTestAuthorizer(t, WithKeyStore(keys), WithKeyRotationInterval(0))

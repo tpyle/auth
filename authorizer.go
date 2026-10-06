@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -194,6 +195,9 @@ func (a *Authorizer) extraClaims(ctx context.Context, subject string) (map[strin
 	// provider does not burn the client's refresh token.
 	if err := checkExtraClaims(extra); err != nil {
 		return nil, err
+	}
+	if _, err := json.Marshal(extra); err != nil {
+		return nil, fmt.Errorf("auth: claims provider returned claims that cannot be encoded: %w", err)
 	}
 	return extra, nil
 }

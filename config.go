@@ -32,7 +32,8 @@ type Config struct {
 	// hash uses that hash's own memory cost, up to Argon2Limits.MemoryKiB, so
 	// peak memory is roughly MaxConcurrentHashes * the larger of the two
 	// (Argon2Limits.MemoryKiB if older or heavier hashes may exist). The
-	// default is the number of CPUs divided by the default parallelism (at
+	// default is GOMAXPROCS (which respects container CPU limits) divided by
+	// the default parallelism (at
 	// least 1), so concurrent hashes do not oversubscribe the CPU.
 	// Callers beyond the cap wait (respecting context cancellation).
 	MaxConcurrentHashes int `mapstructure:"max_concurrent_hashes"`
@@ -87,7 +88,7 @@ func DefaultConfig() Config {
 	return Config{
 		Argon2:              argon,
 		Argon2Limits:        DefaultArgon2Limits(),
-		MaxConcurrentHashes: max(1, runtime.NumCPU()/int(argon.Parallelism)),
+		MaxConcurrentHashes: max(1, runtime.GOMAXPROCS(0)/int(argon.Parallelism)),
 		AccessTokenTTL:      15 * time.Minute,
 		RefreshTokenTTL:     7 * 24 * time.Hour,
 		RefreshReuseGrace:   30 * time.Second,

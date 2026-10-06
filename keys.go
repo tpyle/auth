@@ -100,7 +100,8 @@ func (km *keyManager) generate(ctx context.Context, activatesAt time.Time) (*sig
 	var signUntil time.Time
 	if km.s.KeyRotationInterval > 0 {
 		signUntil = activatesAt.Add(km.s.KeyRotationInterval)
-		vk.ExpiresAt = signUntil.Add(km.s.maxTokenTTL() + keyRetentionMargin + km.s.Leeway)
+		// Separate Adds: summing large durations first could overflow.
+		vk.ExpiresAt = signUntil.Add(km.s.maxTokenTTL()).Add(keyRetentionMargin).Add(km.s.Leeway)
 	}
 	if err := km.s.keyStore.StoreKey(ctx, vk); err != nil {
 		return nil, fmt.Errorf("auth: storing signing key: %w", err)

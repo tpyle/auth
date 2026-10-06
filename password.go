@@ -174,7 +174,8 @@ func decodePHC(s string) (Argon2Params, []byte, []byte, error) {
 		return p, nil, nil, fmt.Errorf("%w: "+format, append([]any{ErrInvalidHash}, args...)...)
 	}
 
-	parts := strings.Split(s, "$")
+	// SplitN bounds the allocation; a seventh element means too many fields.
+	parts := strings.SplitN(s, "$", 7)
 	if len(parts) != 6 || parts[0] != "" {
 		return invalid("expected 5 '$'-separated fields")
 	}
@@ -186,7 +187,7 @@ func decodePHC(s string) (Argon2Params, []byte, []byte, error) {
 	}
 
 	seen := map[string]bool{}
-	for _, kv := range strings.Split(parts[3], ",") {
+	for _, kv := range strings.SplitN(parts[3], ",", 4) {
 		key, val, ok := strings.Cut(kv, "=")
 		if !ok || seen[key] {
 			return invalid("malformed parameter %q", kv)

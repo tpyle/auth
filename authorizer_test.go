@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"math"
 	"math/big"
 	"strings"
 	"sync"
@@ -927,6 +928,24 @@ func TestRefreshErrors(t *testing.T) {
 			if _, err := a.Refresh(ctx, signRaw(t, a, mc, nil)); !errors.Is(err, ErrInvalidToken) {
 				t.Errorf("%s: err = %v", name, err)
 			}
+		}
+	})
+
+	t.Run("provider returns unencodable claim", func(t *testing.T) {
+		a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithRefreshReuseGrace(0))
+		pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+		for _, bad := range []any{make(chan int), math.NaN()} {
+			a.s.claimsProvider = func(context.Context, string) (map[string]any, error) {
+				return map[string]any{"x": bad}, nil
+			}
+			if _, err := a.Refresh(ctx, pair.RefreshToken); err == nil {
+				t.Errorf("%T claim accepted", bad)
+			}
+		}
+		// The token was not consumed, so even in strict mode a retry works.
+		a.s.claimsProvider = nil
+		if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
+			t.Errorf("retry after unencodable claims: %v", err)
 		}
 	})
 

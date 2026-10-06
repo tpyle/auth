@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -50,6 +51,19 @@ func TestConfigValidate(t *testing.T) {
 				t.Error("New accepted invalid config")
 			}
 		})
+	}
+}
+
+// The default concurrency follows GOMAXPROCS, which respects container CPU
+// limits, rather than the host's CPU count.
+func TestDefaultConcurrencyFollowsGOMAXPROCS(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(8))
+	if got := DefaultConfig().MaxConcurrentHashes; got != 2 {
+		t.Errorf("with GOMAXPROCS=8: MaxConcurrentHashes = %d; want 2", got)
+	}
+	runtime.GOMAXPROCS(1)
+	if got := DefaultConfig().MaxConcurrentHashes; got != 1 {
+		t.Errorf("with GOMAXPROCS=1: MaxConcurrentHashes = %d; want 1", got)
 	}
 }
 

@@ -38,7 +38,7 @@ If you raise the cost, measure first: one login should take a few hundred millis
 
 ### Memory sizing
 
-Each running hash allocates memory. `MaxConcurrentHashes` (default: number of CPUs ÷ 4 lanes, at least 1) caps how many run at once. Hashing a new password uses `Argon2.MemoryKiB`, but verifying a stored hash uses **that hash's own** memory cost, which can be anything up to `Argon2Limits.MemoryKiB`. The guaranteed upper bound is therefore:
+Each running hash allocates memory. `MaxConcurrentHashes` (default: `GOMAXPROCS` ÷ 4 lanes, at least 1; `GOMAXPROCS` respects container CPU limits) caps how many run at once. Hashing a new password uses `Argon2.MemoryKiB`, but verifying a stored hash uses **that hash's own** memory cost, which can be anything up to `Argon2Limits.MemoryKiB`. The guaranteed upper bound is therefore:
 
 ```
 MaxConcurrentHashes × max(Argon2.MemoryKiB, Argon2Limits.MemoryKiB)
