@@ -114,7 +114,6 @@ type MemoryRefreshTokenStore struct {
 	mu       sync.Mutex
 	records  map[uuid.UUID]RefreshTokenRecord
 	families map[uuid.UUID]*memoryFamily
-	now      func() time.Time
 }
 
 type memoryFamily struct {
@@ -128,7 +127,6 @@ func NewMemoryRefreshTokenStore() *MemoryRefreshTokenStore {
 	return &MemoryRefreshTokenStore{
 		records:  map[uuid.UUID]RefreshTokenRecord{},
 		families: map[uuid.UUID]*memoryFamily{},
-		now:      time.Now,
 	}
 }
 
@@ -136,7 +134,9 @@ func NewMemoryRefreshTokenStore() *MemoryRefreshTokenStore {
 func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec RefreshTokenRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
+	// Purge relative to the new record's issue time rather than the wall
+	// clock, so the store follows the Authorizer's clock (see WithClock).
+	now := rec.IssuedAt
 	for id, r := range s.records {
 		if now.After(r.ExpiresAt) {
 			delete(s.records, id)

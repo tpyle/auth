@@ -22,7 +22,7 @@ Because the cost parameters come from the stored hash, a corrupt or tampered has
 
 | Limit | `DefaultArgon2Limits()` |
 |---|---|
-| `MemoryKiB` | 1 GiB (`1 << 20`) |
+| `MemoryKiB` | 256 MiB (`256 * 1024`) |
 | `Iterations` | 16 |
 | `Parallelism` | 255 |
 | `SaltLength` | 64 bytes |
@@ -38,13 +38,13 @@ If you raise the cost, measure first: one login should take a few hundred millis
 
 ### Memory sizing
 
-Each running hash allocates `MemoryKiB` of memory. `MaxConcurrentHashes` (default: number of CPUs ÷ 4 lanes, at least 1) caps how many run at once. Peak hashing memory is therefore:
+Each running hash allocates memory. `MaxConcurrentHashes` (default: number of CPUs ÷ 4 lanes, at least 1) caps how many run at once. Hashing a new password uses `Argon2.MemoryKiB`, but verifying a stored hash uses **that hash's own** memory cost, which can be anything up to `Argon2Limits.MemoryKiB`. The guaranteed upper bound is therefore:
 
 ```
-MaxConcurrentHashes × MemoryKiB
+MaxConcurrentHashes × max(Argon2.MemoryKiB, Argon2Limits.MemoryKiB)
 ```
 
-Verifying an older stored hash uses that hash's own `MemoryKiB`, which may be larger than the current setting but never larger than `Argon2Limits.MemoryKiB`. Size for the largest `MemoryKiB` among your stored hashes. With the defaults on an 8-core machine, that is 2 × 64 MiB = 128 MiB. Set `MaxConcurrentHashes` so this fits within your container's memory limit, with room left for everything else. Requests beyond the cap wait for a slot (and give up when their `ctx` is cancelled), so a flood of login requests causes queueing instead of running out of memory. Each hash uses `Parallelism` threads, so the default cap keeps the CPU fully used without oversubscribing it.
+With the defaults on an 8-core machine, normal operation uses 2 × 64 MiB = 128 MiB, and the worst case (every concurrent login hitting a hash at the limit) is 2 × 256 MiB = 512 MiB. If all your stored hashes use the current parameters, lower `Argon2Limits.MemoryKiB` to match `Argon2.MemoryKiB`, so the bound equals normal operation. Keep it at or above the largest cost among your stored hashes, or those users can no longer log in. Set `MaxConcurrentHashes` so this fits within your container's memory limit, with room left for everything else. Requests beyond the cap wait for a slot (and give up when their `ctx` is cancelled), so a flood of login requests causes queueing instead of running out of memory. Each hash uses `Parallelism` threads, so the default cap keeps the CPU fully used without oversubscribing it.
 
 `MaxConcurrentHashes` applies to `Authorizer.HashPassword`, `Authenticate` and `Login`. The package-level `HashPassword`/`VerifyPassword` functions ignore it.
 

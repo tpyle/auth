@@ -16,12 +16,12 @@ You configure an `Authorizer` with functional options passed to `auth.New`. The 
 | `Argon2.Parallelism` | `argon2.parallelism` | `4` | Lanes (threads) per hash. |
 | `Argon2.SaltLength` | `argon2.salt_length` | `16` | Salt length in bytes. Minimum 8. |
 | `Argon2.KeyLength` | `argon2.key_length` | `32` | Hash output length in bytes. Minimum 16. |
-| `Argon2Limits.MemoryKiB` | `argon2_limits.memory_kib` | `1048576` (1 GiB) | Largest memory cost accepted from a **stored** hash. |
+| `Argon2Limits.MemoryKiB` | `argon2_limits.memory_kib` | `262144` (256 MiB) | Largest memory cost accepted from a **stored** hash. |
 | `Argon2Limits.Iterations` | `argon2_limits.iterations` | `16` | Largest iteration count accepted from a stored hash. |
 | `Argon2Limits.Parallelism` | `argon2_limits.parallelism` | `255` | Largest lane count accepted from a stored hash. |
 | `Argon2Limits.SaltLength` | `argon2_limits.salt_length` | `64` | Longest salt accepted from a stored hash, in bytes. At most 1024. |
 | `Argon2Limits.KeyLength` | `argon2_limits.key_length` | `128` | Longest hash accepted from a stored hash, in bytes. At most 1024. |
-| `MaxConcurrentHashes` | `max_concurrent_hashes` | `max(1, runtime.NumCPU() / 4)` | Maximum number of Argon2 computations at once. Extra callers wait or give up when their `ctx` is cancelled. Peak hashing memory is about this × `MemoryKiB`. Must be ≥ 1. |
+| `MaxConcurrentHashes` | `max_concurrent_hashes` | `max(1, runtime.NumCPU() / 4)` | Maximum number of Argon2 computations at once. Extra callers wait or give up when their `ctx` is cancelled. Peak hashing memory is at most this × the larger of `Argon2.MemoryKiB` and `Argon2Limits.MemoryKiB`, because stored hashes are verified with their own cost (see [Security](Security.md#memory-sizing)). Must be ≥ 1. |
 | `AccessTokenTTL` | `access_token_ttl` | `15m` | Lifetime of access tokens. Must be at least 1s, because token timestamps have one-second resolution. |
 | `RefreshTokenTTL` | `refresh_token_ttl` | `168h` (7 days) | Lifetime of each refresh token. Each refresh issues a new one, so a session lasts as long as it is refreshed at least this often. Must be at least 1s. |
 | `RefreshReuseGrace` | `refresh_reuse_grace` | `30s` | How long after a refresh token's **first** use it may be presented again and still get a new pair in the same session, instead of being treated as stolen. Covers concurrent refreshes (several tabs) and retries after a lost response. `0` is strict: any reuse revokes the session. Must be ≥ 0. See [reuse detection](Tokens-and-Keys.md#reuse-detection). |
@@ -137,7 +137,7 @@ auth:
     salt_length: 16
     key_length: 32
   argon2_limits:               # caps on parameters read from stored hashes
-    memory_kib: 1048576
+    memory_kib: 262144
     iterations: 16
     parallelism: 255
     salt_length: 64

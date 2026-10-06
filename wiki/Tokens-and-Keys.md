@@ -14,7 +14,7 @@ Both kinds are JWTs signed with ES256 by the same signing keys. The `typ` header
 | Extra claims | Yes (`ClaimsProvider` or `extra` argument) | No |
 | Accepted by | `VerifyAccessToken`, middleware | `Refresh`, `Logout` |
 
-Each kind is rejected with `ErrInvalidToken` where the other is expected. A refresh token sent as a Bearer token fails, and an access token sent to `Refresh` fails.
+Each kind is rejected with `ErrInvalidToken` where the other is expected. Sending a refresh token in the `Authorization` header fails, and so does passing an access token to `Refresh`.
 
 ### Claim layout
 

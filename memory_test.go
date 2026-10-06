@@ -80,12 +80,11 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	s := NewMemoryRefreshTokenStore()
-	s.now = clock.Now
 
 	fam, other := uuid.New(), uuid.New()
-	a := RefreshTokenRecord{ID: uuid.New(), FamilyID: fam, Subject: "bob", ExpiresAt: clock.Now().Add(time.Hour)}
-	b := RefreshTokenRecord{ID: uuid.New(), FamilyID: fam, Subject: "bob", ExpiresAt: clock.Now().Add(2 * time.Hour)}
-	c := RefreshTokenRecord{ID: uuid.New(), FamilyID: other, Subject: "eve", ExpiresAt: clock.Now().Add(2 * time.Hour)}
+	a := RefreshTokenRecord{ID: uuid.New(), FamilyID: fam, Subject: "bob", IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(time.Hour)}
+	b := RefreshTokenRecord{ID: uuid.New(), FamilyID: fam, Subject: "bob", IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(2 * time.Hour)}
+	c := RefreshTokenRecord{ID: uuid.New(), FamilyID: other, Subject: "eve", IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(2 * time.Hour)}
 	for _, r := range []RefreshTokenRecord{a, b, c} {
 		if err := s.CreateRefreshToken(ctx, r); err != nil {
 			t.Fatal(err)
@@ -112,7 +111,7 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 
 	// Creating a token after a's expiry purges it.
 	clock.Advance(90 * time.Minute)
-	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), Subject: "zed", ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
+	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), Subject: "zed", IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if s.Len() != 3 {
@@ -147,19 +146,19 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 	}
 
 	// A continuation of an unknown (e.g. purged) family is rejected.
-	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), ParentID: uuid.New(), FamilyID: uuid.New(), ExpiresAt: clock.Now().Add(time.Hour)}); !errors.Is(err, ErrTokenRevoked) {
+	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), ParentID: uuid.New(), FamilyID: uuid.New(), IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(time.Hour)}); !errors.Is(err, ErrTokenRevoked) {
 		t.Errorf("continuation of unknown family: err = %v; want ErrTokenRevoked", err)
 	}
 
 	// Revoked families accept no new tokens until they expire.
 	for name, family := range map[string]uuid.UUID{"by family": fam, "by subject": other} {
-		err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: family, ExpiresAt: clock.Now().Add(time.Hour)})
+		err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: family, IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(time.Hour)})
 		if !errors.Is(err, ErrTokenRevoked) {
 			t.Errorf("%s: create in revoked family: err = %v; want ErrTokenRevoked", name, err)
 		}
 	}
 	clock.Advance(3 * time.Hour) // every family's tokens have expired
-	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
+	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), IssuedAt: clock.Now(), ExpiresAt: clock.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.families) != 1 {

@@ -353,6 +353,26 @@ func TestLookupSkipsMalformedStoredKeys(t *testing.T) {
 	}
 }
 
+// The current key's stored expiry is honored even if rotation has stalled.
+func TestCurrentKeyExpiry(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now), WithKeyRotationInterval(time.Hour))
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	cur := a.keys.current.Load()
+	clock.Advance(cur.expiresAt.Sub(clock.Now()))
+	if err := a.Logout(ctx, pair.RefreshToken); err != nil {
+		t.Errorf("logout at the key's expiry: %v", err)
+	}
+	clock.Advance(time.Second)
+	if _, err := a.keys.lookup(ctx, cur.id); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("expired current key accepted: %v", err)
+	}
+	if err := a.Logout(ctx, pair.RefreshToken); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("logout with a token signed by the expired current key: err = %v", err)
+	}
+}
+
 func TestLookupExpiredKey(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()

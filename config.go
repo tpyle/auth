@@ -27,8 +27,11 @@ type Config struct {
 	// corrupt or tampered hash cannot exhaust memory or CPU. Hashes over the
 	// limits fail with [ErrInvalidHash]. Argon2 must be within these limits.
 	Argon2Limits Argon2Params `mapstructure:"argon2_limits"`
-	// MaxConcurrentHashes caps how many Argon2 computations run at once, which
-	// bounds memory use to roughly MaxConcurrentHashes * Argon2.MemoryKiB. The
+	// MaxConcurrentHashes caps how many Argon2 computations run at once.
+	// Hashing a new password uses Argon2.MemoryKiB, but verifying a stored
+	// hash uses that hash's own memory cost, up to Argon2Limits.MemoryKiB, so
+	// peak memory is roughly MaxConcurrentHashes * the larger of the two
+	// (Argon2Limits.MemoryKiB if older or heavier hashes may exist). The
 	// default is the number of CPUs divided by the default parallelism (at
 	// least 1), so concurrent hashes do not oversubscribe the CPU.
 	// Callers beyond the cap wait (respecting context cancellation).

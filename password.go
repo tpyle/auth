@@ -56,12 +56,13 @@ func DefaultArgon2Params() Argon2Params {
 }
 
 // DefaultArgon2Limits returns the upper bounds [VerifyPassword] accepts for
-// a stored hash: 1 GiB of memory, 16 iterations, 255 lanes, a 64-byte salt
-// and a 128-byte hash. These are far above any sensible configuration but
-// stop a corrupt or malicious hash from exhausting memory or CPU.
+// a stored hash: 256 MiB of memory, 16 iterations, 255 lanes, a 64-byte salt
+// and a 128-byte hash. That is four times the default memory cost and twice
+// v1's, and stops a corrupt or malicious hash from exhausting memory or CPU.
+// Raise it if you have deliberately heavier hashes.
 func DefaultArgon2Limits() Argon2Params {
 	return Argon2Params{
-		MemoryKiB:   1 << 20,
+		MemoryKiB:   256 * 1024,
 		Iterations:  16,
 		Parallelism: 255,
 		SaltLength:  64,

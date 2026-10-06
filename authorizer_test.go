@@ -242,6 +242,39 @@ func TestLogin(t *testing.T) {
 	})
 }
 
+// Tokens get their full TTL even when issued just before a second boundary.
+func TestWholeSecondLifetime(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	clock.Advance(999 * time.Millisecond)
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now),
+		WithAccessTokenTTL(time.Second), WithRefreshTokenTTL(time.Second))
+	pair, err := a.IssueTokenPair(ctx, "bob", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := a.VerifyAccessToken(ctx, pair.AccessToken)
+	if got := c.ExpiresAt.Sub(c.IssuedAt); got != time.Second {
+		t.Errorf("access token lifetime = %v; want 1s", got)
+	}
+	rc, _, _ := a.parseRefresh(ctx, pair.RefreshToken, true)
+	if got := rc.ExpiresAt.Sub(rc.IssuedAt); got != time.Second {
+		t.Errorf("refresh token lifetime = %v; want 1s", got)
+	}
+}
+
+// The in-memory refresh store follows the Authorizer's clock, so WithClock
+// works with any fixed time, including one far in the past.
+func TestMemoryRefreshStoreFollowsAuthorizerClock(t *testing.T) {
+	ctx := context.Background()
+	fixed := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(func() time.Time { return fixed }))
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
+		t.Errorf("refresh with a fixed past clock: %v", err)
+	}
+}
+
 // Reported expiry times must match the whole-second "exp" in the token.
 func TestReportedExpiryMatchesToken(t *testing.T) {
 	ctx := context.Background()
@@ -444,7 +477,7 @@ func TestExpiredTokenOfWrongType(t *testing.T) {
 	clock := newFakeClock()
 	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now))
 	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
-	clock.Advance(30 * 24 * time.Hour)
+	clock.Advance(7*24*time.Hour + time.Minute) // both tokens expired; signing key still retained
 	if _, err := a.VerifyAccessToken(ctx, pair.RefreshToken); !errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrTokenExpired) {
 		t.Errorf("expired refresh token as access: err = %v; want only ErrInvalidToken", err)
 	}
@@ -462,7 +495,6 @@ func TestLeewayRetention(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
 	store := NewMemoryRefreshTokenStore()
-	store.now = clock.Now
 	keys := NewMemoryKeyStore()
 	a := newRefreshAuthorizer(t, store, WithClock(clock.Now), WithKeyStore(keys),
 		WithLeeway(time.Minute), WithRefreshTokenTTL(time.Hour), WithKeyRotationInterval(time.Hour))
@@ -937,7 +969,7 @@ func TestLogout(t *testing.T) {
 	stranger := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore())
 
 	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
-	clock.Advance(30 * 24 * time.Hour)
+	clock.Advance(7*24*time.Hour + time.Minute) // expired, within the documented Logout guarantee
 	if err := a.Logout(ctx, pair.RefreshToken); err != nil {
 		t.Errorf("logout with expired token: %v", err)
 	}

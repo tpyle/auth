@@ -123,7 +123,7 @@ Other differences:
 
 ### Password hashes: no migration needed
 
-Existing v1 hashes are standard Argon2id PHC strings and **stay valid**. v1's defaults produced `$argon2id$v=19$m=131072,t=4,p=4$...`. v2 verifies these using the parameters inside the hash. They are well within the default verification limits (`DefaultArgon2Limits()`: 1 GiB, 16 iterations, 255 lanes). If you lower `Argon2Limits`, keep them at or above the v1 parameters until all hashes are upgraded. Because they differ from v2's defaults (`m=65536,t=3,p=4`), they are **rehashed transparently** on each user's next successful login, provided your `UserStore` implements `PasswordHashUpdater` (a compare-and-swap, see [Storage](Storage.md#passwordhashupdater)). Without it, the old hashes keep working but are never upgraded.
+Existing v1 hashes are standard Argon2id PHC strings and **stay valid**. v1's defaults produced `$argon2id$v=19$m=131072,t=4,p=4$...`. v2 verifies these using the parameters inside the hash. They are well within the default verification limits (`DefaultArgon2Limits()`: 256 MiB, 16 iterations, 255 lanes). If you lower `Argon2Limits`, keep them at or above the v1 parameters until all hashes are upgraded. Because they differ from v2's defaults (`m=65536,t=3,p=4`), they are **rehashed transparently** on each user's next successful login, provided your `UserStore` implements `PasswordHashUpdater` (a compare-and-swap, see [Storage](Storage.md#passwordhashupdater)). Without it, the old hashes keep working but are never upgraded.
 
 If you want to keep v1's cost, configure it explicitly:
 

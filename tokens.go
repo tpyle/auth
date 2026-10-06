@@ -154,8 +154,9 @@ func (a *Authorizer) issueAccess(ctx context.Context, subject string, extra map[
 	if err := checkExtraClaims(extra); err != nil {
 		return "", time.Time{}, err
 	}
-	now := a.s.now()
-	exp := toNumericDate(now.Add(a.s.AccessTokenTTL))
+	// Truncate before adding the TTL so the token lives for the full TTL.
+	now := toNumericDate(a.s.now())
+	exp := now.Add(a.s.AccessTokenTTL)
 	mc := a.baseClaims(subject, TokenTypeAccess, uuid.New(), now, exp)
 	for k, v := range extra {
 		mc[k] = v
@@ -167,8 +168,8 @@ func (a *Authorizer) issueAccess(ctx context.Context, subject string, extra map[
 // issueRefresh records and signs a new refresh token in the given family,
 // replacing parent (uuid.Nil for the first token of a login).
 func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family, parent uuid.UUID) (string, time.Time, error) {
-	now := a.s.now()
-	exp := toNumericDate(now.Add(a.s.RefreshTokenTTL))
+	now := toNumericDate(a.s.now())
+	exp := now.Add(a.s.RefreshTokenTTL)
 	rec := RefreshTokenRecord{
 		ID:       uuid.New(),
 		ParentID: parent,

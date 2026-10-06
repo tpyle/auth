@@ -33,6 +33,8 @@ type signingKey struct {
 	// unlimited. The stored ExpiresAt covers tokens signed up to
 	// keyRetentionMargin after it.
 	signUntil time.Time
+	// expiresAt mirrors the stored VerificationKey.ExpiresAt.
+	expiresAt time.Time
 }
 
 // usable reports whether tokens signed at now are covered by the key's
@@ -106,7 +108,7 @@ func (km *keyManager) generate(ctx context.Context, activatesAt time.Time) (*sig
 	km.mu.Lock()
 	km.known[vk.ID] = vk
 	km.mu.Unlock()
-	return &signingKey{id: vk.ID, private: priv, signUntil: signUntil}, nil
+	return &signingKey{id: vk.ID, private: priv, signUntil: signUntil, expiresAt: vk.ExpiresAt}, nil
 }
 
 // ensureNext generates and stores the next key if there is none yet.
@@ -298,6 +300,11 @@ func (km *keyManager) refresh(ctx context.Context, seen time.Time) error {
 // is already known is still used; otherwise the store error is returned.
 func (km *keyManager) lookup(ctx context.Context, id uuid.UUID) (*ecdsa.PublicKey, error) {
 	if cur := km.current.Load(); cur.id == id {
+		// Honor the stored expiry here too, so this instance agrees with
+		// others (and with JWKS) even if rotation has stalled.
+		if !cur.expiresAt.IsZero() && km.s.now().After(cur.expiresAt) {
+			return nil, fmt.Errorf("%w: signing key %s has expired", ErrInvalidToken, id)
+		}
 		return &cur.private.PublicKey, nil
 	}
 	now := km.s.now()
