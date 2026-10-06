@@ -36,6 +36,12 @@ const (
 	minKeyLength  = 16
 )
 
+// maxPHCFieldBytes caps the decoded salt and hash read from a PHC string
+// before any decoding, so an oversized stored value cannot force a large
+// allocation. Salt and key length limits above it are rejected by
+// [Config.Validate].
+const maxPHCFieldBytes = 1024
+
 // DefaultArgon2Params returns the second recommended configuration from
 // RFC 9106 §4: 64 MiB of memory, 3 iterations and 4 lanes, with a 16-byte
 // salt and a 32-byte hash.
@@ -212,6 +218,11 @@ func decodePHC(s string) (Argon2Params, []byte, []byte, error) {
 		return invalid("expected m, t and p parameters")
 	}
 
+	for _, field := range parts[4:] {
+		if base64.RawStdEncoding.DecodedLen(len(field)) > maxPHCFieldBytes {
+			return invalid("salt or hash longer than %d bytes", maxPHCFieldBytes)
+		}
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return invalid("bad salt encoding")

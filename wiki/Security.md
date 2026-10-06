@@ -31,6 +31,7 @@ Because the cost parameters come from the stored hash, a corrupt or tampered has
 - `VerifyPassword` uses `DefaultArgon2Limits()`. `VerifyPasswordWithLimits(password, hash, limits)` takes explicit limits.
 - `Authenticate` and `Login` use `Config.Argon2Limits` (default `DefaultArgon2Limits()`, option `WithArgon2Limits`).
 - `New` rejects a config whose `Argon2` parameters exceed `Argon2Limits` in any field, so you can never create hashes you would refuse to verify.
+- Independently of the configured limits, parsing a PHC string rejects any salt or hash field whose decoded length would exceed **1024 bytes**, before decoding it, so an oversized string cannot force a large allocation. This applies to `VerifyPassword`, `VerifyPasswordWithLimits` and `NeedsRehash`. For the same reason, `Argon2Limits.SaltLength` and `KeyLength` may not be set above 1024.
 - The defaults are far above any sensible setting. v1's `m=131072,t=4,p=4` hashes are well within them. Lowering the limits to just above the parameters you have actually used tightens the bound on per-login cost.
 
 If you raise the cost, measure first: one login should take a few hundred milliseconds at most on your hardware.
@@ -50,6 +51,8 @@ Verifying an older stored hash uses that hash's own `MemoryKiB`, which may be la
 ### Automatic rehash
 
 When you change `Argon2` parameters, existing hashes keep working because each hash records its own parameters. If your `UserStore` implements `PasswordHashUpdater`, every successful login with an outdated hash re-hashes the password with the current parameters and saves the result. To find hashes that still need upgrading, call `NeedsRehash(hash, params)`.
+
+The save is a **compare-and-swap**: `UpdatePasswordHash(ctx, username, oldHash, newHash)` replaces the hash only if it is still the one the login verified. If a password change lands while such a login is running, the upgrade is skipped. Otherwise it would write a fresh hash of the **old** password and undo the change. Custom stores must implement this check atomically. See [Storage](Storage.md#passwordhashupdater).
 
 ### Unknown users
 

@@ -63,7 +63,7 @@ The package manages `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `typ` and `
 
 `Extra` values are decoded from JSON, so numbers are `float64`, arrays are `[]any`, and objects are `map[string]any`. `claims.GetString(name)` is a shortcut for string-valued extras.
 
-Verification checks: the signature (ES256 only), that `kid` is a known and unexpired key, `exp` (required), `iat` (it must not be in the future), `iss` and `aud` when configured, the `typ` claim, and that `sub`, `jti` and `typ` are present. `Leeway` applies to the time checks. A token of the wrong type is rejected with `ErrInvalidToken` even if it has also expired. For example, an expired refresh token passed to `VerifyAccessToken` gives `ErrInvalidToken`, not `ErrTokenExpired`.
+Verification checks: the signature (ES256 only), that `kid` is a known and unexpired key, `exp` (required), `iat` (it must not be in the future), `iss` and `aud` when configured, the `typ` claim, and that `sub`, `jti` and `typ` are present. `Leeway` applies to the time checks. `ErrTokenExpired` is returned only for a token that passes every other check (signature, header and claim type, required claims, issuer, audience) and is merely past `exp`. Any other failure gives `ErrInvalidToken`, even if the token is also expired. For example, an expired refresh token passed to `VerifyAccessToken` gives `ErrInvalidToken`.
 
 ## Refresh rotation
 

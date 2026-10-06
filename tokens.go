@@ -158,12 +158,14 @@ func (a *Authorizer) issueAccess(ctx context.Context, subject string, extra map[
 	return tok, exp, err
 }
 
-// issueRefresh records and signs a new refresh token in the given family.
-func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family uuid.UUID) (string, time.Time, error) {
+// issueRefresh records and signs a new refresh token in the given family,
+// replacing parent (uuid.Nil for the first token of a login).
+func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family, parent uuid.UUID) (string, time.Time, error) {
 	now := a.s.now()
 	exp := now.Add(a.s.RefreshTokenTTL)
 	rec := RefreshTokenRecord{
 		ID:       uuid.New(),
+		ParentID: parent,
 		FamilyID: family,
 		Subject:  subject,
 		IssuedAt: now,
@@ -182,7 +184,7 @@ func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family uu
 
 // issuePair issues an access token and, if refresh tokens are enabled, a
 // refresh token in family.
-func (a *Authorizer) issuePair(ctx context.Context, subject string, extra map[string]any, family uuid.UUID) (*TokenPair, error) {
+func (a *Authorizer) issuePair(ctx context.Context, subject string, extra map[string]any, family, parent uuid.UUID) (*TokenPair, error) {
 	if err := a.checkOpen(); err != nil {
 		return nil, err
 	}
@@ -194,7 +196,7 @@ func (a *Authorizer) issuePair(ctx context.Context, subject string, extra map[st
 	if a.s.refreshStore == nil {
 		return pair, nil
 	}
-	pair.RefreshToken, pair.RefreshTokenExpiresAt, err = a.issueRefresh(ctx, subject, family)
+	pair.RefreshToken, pair.RefreshTokenExpiresAt, err = a.issueRefresh(ctx, subject, family, parent)
 	if err != nil {
 		return nil, err
 	}
@@ -230,12 +232,12 @@ func (a *Authorizer) parse(ctx context.Context, tokenString string, want TokenTy
 	switch {
 	case internalErr != nil:
 		return nil, internalErr
-	case errors.Is(err, jwt.ErrTokenExpired):
-		// The signature was verified before expiry was checked, so the
-		// type can be trusted: a token of the wrong kind is invalid, not
-		// merely expired.
-		if typeErr := checkTokenType(tok, want); typeErr != nil {
-			return nil, typeErr
+	case errors.Is(err, jwt.ErrTokenExpired) && validateTimes:
+		// Only a token that would otherwise be valid is merely expired.
+		// Re-check everything except time (type, required claims, issuer,
+		// audience); any failure there makes it invalid instead.
+		if _, lenientErr := a.parse(ctx, tokenString, want, false); lenientErr != nil {
+			return nil, lenientErr
 		}
 		return nil, fmt.Errorf("%w: %w", ErrTokenExpired, err)
 	case err != nil:

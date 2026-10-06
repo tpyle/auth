@@ -166,16 +166,16 @@ func (a *Authorizer) Authenticate(ctx context.Context, username string, password
 
 	if updater, isUpdater := a.s.userStore.(PasswordHashUpdater); isUpdater {
 		if stale, _ := NeedsRehash(stored, a.s.Argon2); stale {
-			a.rehash(ctx, updater, username, password)
+			a.rehash(ctx, updater, username, stored, password)
 		}
 	}
 	return nil
 }
 
-func (a *Authorizer) rehash(ctx context.Context, updater PasswordHashUpdater, username string, password []byte) {
+func (a *Authorizer) rehash(ctx context.Context, updater PasswordHashUpdater, username, stored string, password []byte) {
 	h, err := a.HashPassword(ctx, password)
 	if err == nil {
-		err = updater.UpdatePasswordHash(ctx, username, h)
+		err = updater.UpdatePasswordHash(ctx, username, stored, h)
 	}
 	if err != nil {
 		a.s.logger.WarnContext(ctx, "auth: upgrading password hash", "error", err)
@@ -207,7 +207,7 @@ func (a *Authorizer) Login(ctx context.Context, username string, password []byte
 	if err != nil {
 		return nil, err
 	}
-	return a.issuePair(ctx, username, extra, uuid.New())
+	return a.issuePair(ctx, username, extra, uuid.New(), uuid.Nil)
 }
 
 // IssueAccessToken signs an access token for subject without checking any
@@ -227,7 +227,7 @@ func (a *Authorizer) IssueAccessToken(subject string, extra map[string]any) (str
 // refresh token, starting a new refresh-token family, when a
 // [RefreshTokenStore] is configured.
 func (a *Authorizer) IssueTokenPair(ctx context.Context, subject string, extra map[string]any) (*TokenPair, error) {
-	return a.issuePair(ctx, subject, extra, uuid.New())
+	return a.issuePair(ctx, subject, extra, uuid.New(), uuid.Nil)
 }
 
 // VerifyAccessToken checks an access token's signature, expiry, issuer,
@@ -285,7 +285,7 @@ func (a *Authorizer) Refresh(ctx context.Context, refreshToken string) (*TokenPa
 		}
 		return nil, ErrRefreshTokenReused
 	}
-	return a.issuePair(ctx, c.Subject, extra, family)
+	return a.issuePair(ctx, c.Subject, extra, family, id)
 }
 
 // Logout revokes the session the refresh token belongs to, including any

@@ -101,6 +101,9 @@ func (c Config) Validate() error {
 	} else if err := c.Argon2.within(c.Argon2Limits); err != nil {
 		errs = append(errs, fmt.Errorf("auth: Argon2 is outside Argon2Limits: %w", err))
 	}
+	if c.Argon2Limits.SaltLength > maxPHCFieldBytes || c.Argon2Limits.KeyLength > maxPHCFieldBytes {
+		errs = append(errs, fmt.Errorf("auth: Argon2Limits salt and key lengths must not exceed %d bytes", maxPHCFieldBytes))
+	}
 	if c.MaxConcurrentHashes < 1 {
 		errs = append(errs, errors.New("auth: MaxConcurrentHashes must be at least 1"))
 	}

@@ -18,6 +18,8 @@ func TestConfigValidate(t *testing.T) {
 	tests := map[string]func(*Config){
 		"argon2":                func(c *Config) { c.Argon2.Iterations = 0 },
 		"argon2 over limits":    func(c *Config) { c.Argon2Limits.MemoryKiB = c.Argon2.MemoryKiB - 1 },
+		"key limit too big":     func(c *Config) { c.Argon2Limits.KeyLength = 1025 },
+		"salt limit too big":    func(c *Config) { c.Argon2Limits.SaltLength = 1025 },
 		"max hashes":            func(c *Config) { c.MaxConcurrentHashes = 0 },
 		"access ttl":            func(c *Config) { c.AccessTokenTTL = 0 },
 		"refresh ttl":           func(c *Config) { c.RefreshTokenTTL = -time.Second },

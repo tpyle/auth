@@ -30,11 +30,25 @@ type UserStore interface {
 
 ```go
 type PasswordHashUpdater interface {
-	UpdatePasswordHash(ctx context.Context, username, encodedHash string) error
+	UpdatePasswordHash(ctx context.Context, username, oldHash, newHash string) error
 }
 ```
 
 If your `UserStore` also implements this interface, then after a **successful** login whose stored hash used different Argon2 parameters (including salt or key length) than the current config, the password is hashed again with the current parameters and saved. This happens synchronously, before `Authenticate`/`Login` returns. If the update fails, the error is logged at warn level and the login still succeeds.
+
+`UpdatePasswordHash` must be a **compare-and-swap**. Replace the hash with `newHash` only if it is still `oldHash` (the hash the login just verified), and do it atomically. If the hash has changed in the meantime, do nothing and return nil. That happens, for example, when a password change lands while the login that triggered the upgrade is still running. Without the check, the upgrade would write a hash of the **old** password and silently undo the change. In SQL, put the old hash in the `WHERE` clause (from [`examples/sqlstore/sqlstore.go`](../examples/sqlstore/sqlstore.go)):
+
+```go
+// UpdatePasswordHash implements auth.PasswordHashUpdater. The WHERE clause
+// makes it a compare-and-swap: if the password was changed since oldHash was
+// read, nothing is updated.
+func (s *Store) UpdatePasswordHash(ctx context.Context, username, oldHash, newHash string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET password_hash = $3 WHERE username = $1 AND password_hash = $2`,
+		username, oldHash, newHash)
+	return err
+}
+```
 
 ## KeyStore
 
@@ -85,6 +99,7 @@ type RefreshTokenStore interface {
 
 type RefreshTokenRecord struct {
 	ID        uuid.UUID // the token's "jti"
+	ParentID  uuid.UUID // the consumed token this one replaced; uuid.Nil for a login's first token
 	FamilyID  uuid.UUID // one per login session
 	Subject   string
 	IssuedAt  time.Time
@@ -102,8 +117,8 @@ Besides individual records, a store must remember **families** (one per login se
 Contract:
 
 - `CreateRefreshToken` saves a new record with a zero `UsedAt`.
-  - The first record of a family (from `Login` or `IssueTokenPair`) creates the family.
-  - If `rec.FamilyID` has been revoked, it must return an error **wrapping `auth.ErrTokenRevoked`** and save nothing.
+  - A record with `ParentID == uuid.Nil` is the first token of a login (`Login` or `IssueTokenPair`) and **starts a new family**.
+  - Any other record comes from a `Refresh` (`ParentID` is the consumed token it replaces) and **continues an existing family**. If that family has been revoked **or no longer exists**, return an error **wrapping `auth.ErrTokenRevoked`** and save nothing. Never create the family on this path. A refresh that stalls until after its family was revoked and then purged must not bring the family back.
   - This check and the revoke methods' marking must be **atomic with respect to each other**. A token created at the same time as a revocation must be either rejected or deleted by that revocation. In SQL, lock the family row in both operations (see below).
 - `ConsumeRefreshToken(ctx, id, now)` must **atomically** set `UsedAt = now` **only if it is unset**, and return the record **as it was before the call**:
   - If the token was unused, the returned record has a zero `UsedAt`. Exactly one of any number of concurrent callers may get this result. If two callers both see an unused token, one stolen token can be refreshed twice and reuse detection is bypassed. Use a conditional `UPDATE` or a row lock, never a separate read and then write.
@@ -123,7 +138,7 @@ DELETE FROM refresh_families WHERE expires_at < now();  -- cascades to their tok
 DELETE FROM refresh_tokens   WHERE expires_at < now();
 ```
 
-This is safe. A record's `ExpiresAt` is the token's `exp` **plus `Leeway`**, the moment the token can no longer be accepted, so after it the record is not needed. Purging on `ExpiresAt` keeps records, and the tombstones of revoked families, through the leeway window. A family's `expires_at` is the latest `ExpiresAt` of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. `MemoryRefreshTokenStore` purges expired records and families on every `CreateRefreshToken`.
+This is safe. A record's `ExpiresAt` is the token's `exp` **plus `Leeway`**, the moment the token can no longer be accepted, so after it the record is not needed. Purging on `ExpiresAt` keeps records, and the tombstones of revoked families, through the leeway window. A family's `expires_at` is the latest `ExpiresAt` of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. A refresh that was stalled past that point cannot recreate the purged family, because continuing a missing family fails (see `ParentID` above). `MemoryRefreshTokenStore` purges expired records and families on every `CreateRefreshToken`.
 
 ## PostgreSQL
 
@@ -177,7 +192,7 @@ The refresh-token methods rely on PostgreSQL's default **`READ COMMITTED`** isol
 **Create vs. revoke.** `CreateRefreshToken` runs in a transaction that holds two locks until commit:
 
 - a **shared** advisory lock on the subject, which `RevokeRefreshTokensForSubject` takes **exclusively**. This covers a brand-new family (a login), which has no row yet for revocation to lock.
-- the family row, locked by the upsert, which `RevokeRefreshTokenFamily` updates.
+- the family row, which `RevokeRefreshTokenFamily` updates. A login **inserts** it, which locks the new row. A refresh **updates** it (extending `expires_at`) with `RETURNING revoked`, which locks the existing row. If the update finds no row (the family was purged) or a revoked one, the create fails with `ErrTokenRevoked`.
 
 Locks are always taken subject first, then family, so the two cannot deadlock. Each create therefore serializes with any revocation that could affect it:
 
@@ -188,31 +203,42 @@ Locks are always taken subject first, then family, so the two cannot deadlock. E
 //   - A shared advisory lock on the subject, which RevokeRefreshTokensForSubject
 //     takes exclusively. This covers a brand-new family, which has no row for
 //     revocation to lock yet.
-//   - The family row, locked by the upsert, which RevokeRefreshTokenFamily
-//     updates.
+//   - The family row, inserted (login) or updated (refresh), which
+//     RevokeRefreshTokenFamily updates.
 //
 // Either revocation commits first and this sees revoked = TRUE (or, for a new
 // family, starts after revocation, as a later login), or this commits first
 // and revocation's later statements, with fresh snapshots, revoke the new
-// token. Locks are always taken subject first, then family.
+// token. Locks are always taken subject first, then family. A refresh whose
+// family row is gone (revoked and purged while the request was stalled) is
+// rejected rather than recreating the family.
 func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, r.Subject); err != nil {
 			return err
 		}
-		var revoked bool
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)
-			ON CONFLICT (id) DO UPDATE
-				SET expires_at = GREATEST(refresh_families.expires_at, EXCLUDED.expires_at)
-			RETURNING revoked`, r.FamilyID, r.Subject, r.ExpiresAt).Scan(&revoked)
-		if err != nil {
-			return err
+		if r.ParentID == uuid.Nil {
+			// A login: start a new family.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)`,
+				r.FamilyID, r.Subject, r.ExpiresAt); err != nil {
+				return err
+			}
+		} else {
+			// A refresh: the family must still exist and not be revoked.
+			// The UPDATE locks its row until commit.
+			var revoked bool
+			err := tx.QueryRowContext(ctx, `
+				UPDATE refresh_families SET expires_at = GREATEST(expires_at, $2)
+				WHERE id = $1 RETURNING revoked`, r.FamilyID, r.ExpiresAt).Scan(&revoked)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && revoked) {
+				return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, r.FamilyID)
+			}
+			if err != nil {
+				return err
+			}
 		}
-		if revoked {
-			return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, r.FamilyID)
-		}
-		_, err = tx.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			`INSERT INTO refresh_tokens (id, family_id, subject, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
 			r.ID, r.FamilyID, r.Subject, r.IssuedAt, r.ExpiresAt)
 		return err
@@ -300,9 +326,9 @@ The example also has `PurgeExpiredRefreshTokens(ctx, now)`, which deletes expire
 
 | Type | Implements | Notes |
 |---|---|---|
-| `MemoryUserStore` (`NewMemoryUserStore()`) | `UserStore`, `PasswordHashUpdater` | `SetPasswordHash(username, hash)` adds a user or replaces one. |
+| `MemoryUserStore` (`NewMemoryUserStore()`) | `UserStore`, `PasswordHashUpdater` | `SetPasswordHash(username, hash)` adds a user or replaces one. `UpdatePasswordHash` is a compare-and-swap. |
 | `MemoryKeyStore` (`NewMemoryKeyStore()`) | `KeyStore` | Used automatically when no `KeyStore` is given. Keeps keys in encoded (PKIX DER) form, like a database would, and `StoreKey` rejects a key without a `PublicKey`. |
-| `MemoryRefreshTokenStore` (`NewMemoryRefreshTokenStore()`) | `RefreshTokenStore` | Tracks families and their revoked state under one mutex, so creation and revocation are atomic. Purges expired records and families on every `CreateRefreshToken`. `Len()` reports how many records it holds, including used ones (families are not counted). |
+| `MemoryRefreshTokenStore` (`NewMemoryRefreshTokenStore()`) | `RefreshTokenStore` | Tracks families and their revoked state under one mutex, so creation and revocation are atomic. A refresh into a family it no longer knows is rejected with `ErrTokenRevoked`. Purges expired records and families on every `CreateRefreshToken`. `Len()` reports how many records it holds, including used ones (families are not counted). |
 
 All of them are safe for concurrent use. They never keep caller-owned pointers, so changing a value after passing it in does not affect the store.
 

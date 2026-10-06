@@ -24,7 +24,12 @@ type UserStore interface {
 // implements it, a successful login whose stored hash used outdated
 // [Argon2Params] automatically writes a new hash.
 type PasswordHashUpdater interface {
-	UpdatePasswordHash(ctx context.Context, username, encodedHash string) error
+	// UpdatePasswordHash replaces the user's hash with newHash only if it is
+	// still oldHash, atomically (compare-and-swap). If the hash has changed,
+	// for example because the password was changed while the login that
+	// triggered the upgrade was in progress, it must do nothing and return
+	// nil; overwriting would restore the old password.
+	UpdatePasswordHash(ctx context.Context, username, oldHash, newHash string) error
 }
 
 // VerificationKey is the public half of a signing key, as stored in a
@@ -97,6 +102,9 @@ type KeyStore interface {
 type RefreshTokenRecord struct {
 	// ID is the token's "jti" claim.
 	ID uuid.UUID
+	// ParentID is the token this one replaced, or [uuid.Nil] for the first
+	// token of a login, which starts a new family.
+	ParentID uuid.UUID
 	// FamilyID groups every token descended from one login. Revoking a
 	// family logs that session out.
 	FamilyID uuid.UUID
@@ -136,9 +144,11 @@ func (r RefreshTokenRecord) Used() bool {
 //
 // Implementations must be safe for concurrent use.
 type RefreshTokenStore interface {
-	// CreateRefreshToken saves a new, unused record. The first record of a
-	// family (from a login) creates the family. It must return an error
-	// wrapping [ErrTokenRevoked] if rec.FamilyID has been revoked.
+	// CreateRefreshToken saves a new, unused record. A record with no
+	// ParentID starts a new family. Any other record continues an existing
+	// family, and must fail with an error wrapping [ErrTokenRevoked] if the
+	// family has been revoked or no longer exists (a refresh delayed until
+	// after its family was revoked and forgotten must not revive it).
 	CreateRefreshToken(ctx context.Context, rec RefreshTokenRecord) error
 	// ConsumeRefreshToken atomically sets UsedAt to now if it is not already
 	// set, and returns the record as it was *before* the call, so that two

@@ -78,9 +78,13 @@ func (s *Store) LookupPasswordHash(ctx context.Context, username string) (string
 	return h, err
 }
 
-// UpdatePasswordHash implements auth.PasswordHashUpdater.
-func (s *Store) UpdatePasswordHash(ctx context.Context, username, encodedHash string) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE users SET password_hash = $2 WHERE username = $1`, username, encodedHash)
+// UpdatePasswordHash implements auth.PasswordHashUpdater. The WHERE clause
+// makes it a compare-and-swap: if the password was changed since oldHash was
+// read, nothing is updated.
+func (s *Store) UpdatePasswordHash(ctx context.Context, username, oldHash, newHash string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE users SET password_hash = $3 WHERE username = $1 AND password_hash = $2`,
+		username, oldHash, newHash)
 	return err
 }
 
@@ -130,31 +134,42 @@ func (s *Store) DeleteKeys(ctx context.Context, ids []uuid.UUID) error {
 //   - A shared advisory lock on the subject, which RevokeRefreshTokensForSubject
 //     takes exclusively. This covers a brand-new family, which has no row for
 //     revocation to lock yet.
-//   - The family row, locked by the upsert, which RevokeRefreshTokenFamily
-//     updates.
+//   - The family row, inserted (login) or updated (refresh), which
+//     RevokeRefreshTokenFamily updates.
 //
 // Either revocation commits first and this sees revoked = TRUE (or, for a new
 // family, starts after revocation, as a later login), or this commits first
 // and revocation's later statements, with fresh snapshots, revoke the new
-// token. Locks are always taken subject first, then family.
+// token. Locks are always taken subject first, then family. A refresh whose
+// family row is gone (revoked and purged while the request was stalled) is
+// rejected rather than recreating the family.
 func (s *Store) CreateRefreshToken(ctx context.Context, r auth.RefreshTokenRecord) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`, r.Subject); err != nil {
 			return err
 		}
-		var revoked bool
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)
-			ON CONFLICT (id) DO UPDATE
-				SET expires_at = GREATEST(refresh_families.expires_at, EXCLUDED.expires_at)
-			RETURNING revoked`, r.FamilyID, r.Subject, r.ExpiresAt).Scan(&revoked)
-		if err != nil {
-			return err
+		if r.ParentID == uuid.Nil {
+			// A login: start a new family.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO refresh_families (id, subject, expires_at) VALUES ($1, $2, $3)`,
+				r.FamilyID, r.Subject, r.ExpiresAt); err != nil {
+				return err
+			}
+		} else {
+			// A refresh: the family must still exist and not be revoked.
+			// The UPDATE locks its row until commit.
+			var revoked bool
+			err := tx.QueryRowContext(ctx, `
+				UPDATE refresh_families SET expires_at = GREATEST(expires_at, $2)
+				WHERE id = $1 RETURNING revoked`, r.FamilyID, r.ExpiresAt).Scan(&revoked)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && revoked) {
+				return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, r.FamilyID)
+			}
+			if err != nil {
+				return err
+			}
 		}
-		if revoked {
-			return fmt.Errorf("%w: family %s", auth.ErrTokenRevoked, r.FamilyID)
-		}
-		_, err = tx.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			`INSERT INTO refresh_tokens (id, family_id, subject, issued_at, expires_at) VALUES ($1, $2, $3, $4, $5)`,
 			r.ID, r.FamilyID, r.Subject, r.IssuedAt, r.ExpiresAt)
 		return err

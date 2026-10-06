@@ -37,13 +37,13 @@ v2 is a redesign. The API is not source-compatible, and **all tokens issued by v
 
 | v1 option | v2 |
 |---|---|
-| `WithLookupUserPasswordFunc(func(username) (string, error))` | `WithUserStore(UserStore)`: `LookupPasswordHash(ctx, username)`. Must return `ErrUserNotFound` for unknown users. Optionally also implement `PasswordHashUpdater`. |
+| `WithLookupUserPasswordFunc(func(username) (string, error))` | `WithUserStore(UserStore)`: `LookupPasswordHash(ctx, username)`. Must return `ErrUserNotFound` for unknown users. Optionally also implement `PasswordHashUpdater` (`UpdatePasswordHash(ctx, username, oldHash, newHash)`, a compare-and-swap). |
 | `WithStoreNewSigningKeyFunc` | `KeyStore.StoreKey` |
 | `WithGetSigningKeyFunc` | Removed. There is no single-key lookup: each `Authorizer` keeps an in-memory copy of the key set loaded with `ListKeys` ([details](Tokens-and-Keys.md#key-set-cache)). |
 | `WithGetSigningKeysFunc` | `KeyStore.ListKeys` |
 | `WithDeleteExpiredSigningKeyFunc`, `WithDeleteExpiredSigningKeysFunc` | `KeyStore.DeleteKeys` |
 | `WithLookupRefreshTokenFunc` | `RefreshTokenStore.ConsumeRefreshToken(ctx, id, now)` (atomically sets `UsedAt` if unset and returns the previous record) |
-| `WithStoreRefreshTokenFunc` | `RefreshTokenStore.CreateRefreshToken` (also creates the family, and must fail with `ErrTokenRevoked` for a revoked family) |
+| `WithStoreRefreshTokenFunc` | `RefreshTokenStore.CreateRefreshToken`. A record without `ParentID` (login) starts a family. A record with one (refresh) continues it, and must fail with `ErrTokenRevoked` if the family is revoked or gone. |
 | `WithDeleteRefreshTokenFunc` | `RefreshTokenStore.RevokeRefreshTokenFamily` (marks the family revoked and deletes its tokens) |
 | (none) | `RefreshTokenStore.RevokeRefreshTokensForSubject`, used by the new `Authorizer.RevokeAllSessions` |
 
@@ -91,7 +91,7 @@ Viper keys changed:
 | `KeyPairWithCreationTime{ID, PublicKey, CreationTime}` | `VerificationKey{ID, PublicKey, CreatedAt, ExpiresAt}` |
 | `kp.GetPublicKeyAsBinary()` | `key.MarshalPublicKey()` (same PKIX DER encoding) |
 | `GetECDSAPublicKeyFromBinary(b)` | `ParsePublicKey(b)` (now rejects non-P-256 keys) |
-| `RefreshToken{ID, Rand, Subject}` | `RefreshTokenRecord{ID, FamilyID, Subject, IssuedAt, ExpiresAt, UsedAt}` (with method `Used()`) |
+| `RefreshToken{ID, Rand, Subject}` | `RefreshTokenRecord{ID, ParentID, FamilyID, Subject, IssuedAt, ExpiresAt, UsedAt}` (with method `Used()`) |
 | `AuthorizerToken` (`jwt.Token`) / `tok.IsValid()` | `*Claims` (only returned when valid) |
 | `GetToken(ctx) *AuthorizerToken` | `ClaimsFromContext(ctx) (*Claims, bool)` |
 | `WithToken(ctx, tok)` | `ContextWithClaims(ctx, claims)` |
@@ -123,7 +123,7 @@ Other differences:
 
 ### Password hashes: no migration needed
 
-Existing v1 hashes are standard Argon2id PHC strings and **stay valid**. v1's defaults produced `$argon2id$v=19$m=131072,t=4,p=4$...`. v2 verifies these using the parameters inside the hash. They are well within the default verification limits (`DefaultArgon2Limits()`: 1 GiB, 16 iterations, 255 lanes). If you lower `Argon2Limits`, keep them at or above the v1 parameters until all hashes are upgraded. Because they differ from v2's defaults (`m=65536,t=3,p=4`), they are **rehashed transparently** on each user's next successful login, provided your `UserStore` implements `PasswordHashUpdater`. Without it, the old hashes keep working but are never upgraded.
+Existing v1 hashes are standard Argon2id PHC strings and **stay valid**. v1's defaults produced `$argon2id$v=19$m=131072,t=4,p=4$...`. v2 verifies these using the parameters inside the hash. They are well within the default verification limits (`DefaultArgon2Limits()`: 1 GiB, 16 iterations, 255 lanes). If you lower `Argon2Limits`, keep them at or above the v1 parameters until all hashes are upgraded. Because they differ from v2's defaults (`m=65536,t=3,p=4`), they are **rehashed transparently** on each user's next successful login, provided your `UserStore` implements `PasswordHashUpdater` (a compare-and-swap, see [Storage](Storage.md#passwordhashupdater)). Without it, the old hashes keep working but are never upgraded.
 
 If you want to keep v1's cost, configure it explicitly:
 

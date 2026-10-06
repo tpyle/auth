@@ -40,8 +40,12 @@ func (s *MemoryUserStore) LookupPasswordHash(_ context.Context, username string)
 }
 
 // UpdatePasswordHash implements [PasswordHashUpdater].
-func (s *MemoryUserStore) UpdatePasswordHash(_ context.Context, username, encodedHash string) error {
-	s.SetPasswordHash(username, encodedHash)
+func (s *MemoryUserStore) UpdatePasswordHash(_ context.Context, username, oldHash, newHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h, ok := s.hashes[username]; ok && h == oldHash {
+		s.hashes[username] = newHash
+	}
 	return nil
 }
 
@@ -146,8 +150,10 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 
 	f := s.families[rec.FamilyID]
 	switch {
-	case f == nil:
+	case f == nil && rec.ParentID == uuid.Nil:
 		s.families[rec.FamilyID] = &memoryFamily{subject: rec.Subject, expiresAt: rec.ExpiresAt}
+	case f == nil:
+		return fmt.Errorf("%w: family %s no longer exists", ErrTokenRevoked, rec.FamilyID)
 	case f.revoked:
 		return fmt.Errorf("%w: family %s", ErrTokenRevoked, rec.FamilyID)
 	case rec.ExpiresAt.After(f.expiresAt):

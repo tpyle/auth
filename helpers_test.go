@@ -159,13 +159,26 @@ func (f userStoreFunc) LookupPasswordHash(ctx context.Context, username string) 
 	return f(ctx, username)
 }
 
+// racingUserStore simulates a password change that lands after a login has
+// read the old hash but before its rehash is written.
+type racingUserStore struct {
+	*MemoryUserStore
+	changeTo string
+}
+
+func (r *racingUserStore) LookupPasswordHash(ctx context.Context, username string) (string, error) {
+	h, err := r.MemoryUserStore.LookupPasswordHash(ctx, username)
+	r.SetPasswordHash(username, r.changeTo)
+	return h, err
+}
+
 // failingUpdater is a UserStore whose UpdatePasswordHash always fails.
 type failingUpdater struct {
 	*MemoryUserStore
 	calls atomic.Int32
 }
 
-func (f *failingUpdater) UpdatePasswordHash(context.Context, string, string) error {
+func (f *failingUpdater) UpdatePasswordHash(context.Context, string, string, string) error {
 	f.calls.Add(1)
 	return errTest
 }

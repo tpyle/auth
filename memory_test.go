@@ -22,11 +22,24 @@ func TestMemoryUserStore(t *testing.T) {
 	if h, err := s.LookupPasswordHash(ctx, "bob"); err != nil || h != "h1" {
 		t.Errorf("got %q, %v", h, err)
 	}
-	if err := s.UpdatePasswordHash(ctx, "bob", "h2"); err != nil {
+	if err := s.UpdatePasswordHash(ctx, "bob", "h1", "h2"); err != nil {
 		t.Fatal(err)
 	}
 	if h, _ := s.LookupPasswordHash(ctx, "bob"); h != "h2" {
 		t.Errorf("got %q after update", h)
+	}
+	// A stale old hash must not overwrite the current one.
+	if err := s.UpdatePasswordHash(ctx, "bob", "h1", "h3"); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := s.LookupPasswordHash(ctx, "bob"); h != "h2" {
+		t.Errorf("compare-and-swap overwrote a changed hash: got %q", h)
+	}
+	if err := s.UpdatePasswordHash(ctx, "nobody", "", "h"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupPasswordHash(ctx, "nobody"); !errors.Is(err, ErrUserNotFound) {
+		t.Error("update created a user")
 	}
 }
 
@@ -131,6 +144,11 @@ func TestMemoryRefreshTokenStore(t *testing.T) {
 	}
 	if err := s.RevokeRefreshTokensForSubject(ctx, "nobody"); err != nil {
 		t.Errorf("revoking unknown subject: %v", err)
+	}
+
+	// A continuation of an unknown (e.g. purged) family is rejected.
+	if err := s.CreateRefreshToken(ctx, RefreshTokenRecord{ID: uuid.New(), ParentID: uuid.New(), FamilyID: uuid.New(), ExpiresAt: clock.Now().Add(time.Hour)}); !errors.Is(err, ErrTokenRevoked) {
+		t.Errorf("continuation of unknown family: err = %v; want ErrTokenRevoked", err)
 	}
 
 	// Revoked families accept no new tokens until they expire.

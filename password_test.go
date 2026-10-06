@@ -141,6 +141,16 @@ func TestVerifyPasswordLimits(t *testing.T) {
 		}
 	}
 
+	// Oversized fields are rejected before being decoded, including by
+	// NeedsRehash, which never computes a hash.
+	huge := "$argon2id$v=19$m=64,t=1,p=1$" + strings.Repeat("A", 2000) + "$" + hash
+	if _, err := VerifyPassword([]byte("pw"), huge); !errors.Is(err, ErrInvalidHash) {
+		t.Errorf("oversized salt: err = %v", err)
+	}
+	if _, err := NeedsRehash(huge, testArgon2); !errors.Is(err, ErrInvalidHash) {
+		t.Errorf("NeedsRehash oversized salt: err = %v", err)
+	}
+
 	h := mustHash(t, "pw")
 	tight := testArgon2
 	tight.MemoryKiB = 32

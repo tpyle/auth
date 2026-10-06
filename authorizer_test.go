@@ -122,6 +122,19 @@ func TestAuthenticateRehashesOutdatedHashes(t *testing.T) {
 		}
 	})
 
+	t.Run("does not undo a concurrent password change", func(t *testing.T) {
+		newHash := mustHash(t, "new password")
+		users := &racingUserStore{MemoryUserStore: NewMemoryUserStore(), changeTo: newHash}
+		users.SetPasswordHash("bob", oldHash)
+		a := newTestAuthorizer(t, WithUserStore(users))
+		if err := a.Authenticate(ctx, "bob", []byte("pw")); err != nil {
+			t.Fatal(err)
+		}
+		if h, _ := users.MemoryUserStore.LookupPasswordHash(ctx, "bob"); h != newHash {
+			t.Error("rehash of the old password overwrote the new password")
+		}
+	})
+
 	t.Run("store without updater", func(t *testing.T) {
 		users := userStoreFunc(func(context.Context, string) (string, error) { return oldHash, nil })
 		a := newTestAuthorizer(t, WithUserStore(users))
@@ -427,6 +440,29 @@ func TestLeewayRetention(t *testing.T) {
 	}
 }
 
+// An expired token is only reported as expired if it is otherwise valid.
+func TestExpiredTokenMustOtherwiseBeValid(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	keys := NewMemoryKeyStore()
+	a := newTestAuthorizer(t, WithClock(clock.Now), WithKeyStore(keys), WithIssuer("me"))
+	other := newTestAuthorizer(t, WithClock(clock.Now), WithKeyStore(keys), WithIssuer("someone-else"))
+	now := clock.Now().Unix()
+	noJTI := signRaw(t, a, jwt.MapClaims{"sub": "bob", "iss": "me", "iat": now, "exp": now + 60, "typ": "access"}, nil)
+	wrongIssuer, _ := other.IssueAccessToken("bob", nil)
+	valid, _ := a.IssueAccessToken("bob", nil)
+
+	clock.Advance(time.Hour)
+	for name, tok := range map[string]string{"missing jti": noJTI, "wrong issuer": wrongIssuer} {
+		if _, err := a.VerifyAccessToken(ctx, tok); !errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrTokenExpired) {
+			t.Errorf("%s: err = %v; want only ErrInvalidToken", name, err)
+		}
+	}
+	if _, err := a.VerifyAccessToken(ctx, valid); !errors.Is(err, ErrTokenExpired) || errors.Is(err, ErrInvalidToken) {
+		t.Errorf("valid expired token: err = %v; want only ErrTokenExpired", err)
+	}
+}
+
 func TestVerifyIssuerAndAudience(t *testing.T) {
 	ctx := context.Background()
 	keys := NewMemoryKeyStore()
@@ -668,6 +704,29 @@ func TestRevocationDuringRefresh(t *testing.T) {
 				t.Errorf("err = %v; want ErrTokenRevoked", err)
 			}
 		})
+	}
+}
+
+// A refresh stalled long enough for its revoked family to be purged must not
+// recreate the family.
+func TestRefreshAfterFamilyPurged(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemoryRefreshTokenStore()
+	store := &faultyRefreshStore{RefreshTokenStore: mem}
+	a := newRefreshAuthorizer(t, store)
+	pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+	store.beforeCreate = func() {
+		store.beforeCreate = nil
+		_ = a.Logout(ctx, pair.RefreshToken)
+		mem.mu.Lock()
+		clear(mem.families) // what a purge does once the family has expired
+		mem.mu.Unlock()
+	}
+	if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, ErrTokenRevoked) {
+		t.Errorf("err = %v; want ErrTokenRevoked", err)
+	}
+	if mem.Len() != 0 {
+		t.Error("the stalled refresh recreated the session")
 	}
 }
 
