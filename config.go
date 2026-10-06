@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"slices"
 	"time"
 )
 
@@ -275,6 +276,9 @@ func buildSettings(opts []Option) (*settings, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
+	// Copy so later changes to the caller's slice cannot affect issued
+	// tokens or race with them.
+	s.Audience = slices.Clone(s.Audience)
 	if s.keyStore == nil {
 		s.keyStore = NewMemoryKeyStore()
 	}

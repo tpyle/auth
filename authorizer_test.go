@@ -242,6 +242,48 @@ func TestLogin(t *testing.T) {
 	})
 }
 
+// Reported expiry times must match the whole-second "exp" in the token.
+func TestReportedExpiryMatchesToken(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	clock.Advance(700 * time.Millisecond)
+	a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithClock(clock.Now))
+	pair, err := a.IssueTokenPair(ctx, "bob", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := a.VerifyAccessToken(ctx, pair.AccessToken)
+	if !pair.AccessTokenExpiresAt.Equal(c.ExpiresAt) {
+		t.Errorf("AccessTokenExpiresAt %v; token exp %v", pair.AccessTokenExpiresAt, c.ExpiresAt)
+	}
+	rc, _, _ := a.parseRefresh(ctx, pair.RefreshToken, true)
+	if !pair.RefreshTokenExpiresAt.Equal(rc.ExpiresAt) {
+		t.Errorf("RefreshTokenExpiresAt %v; token exp %v", pair.RefreshTokenExpiresAt, rc.ExpiresAt)
+	}
+}
+
+// The Authorizer must not share the audience slice with the caller.
+func TestAudienceIsCopied(t *testing.T) {
+	ctx := context.Background()
+	aud := []string{"api"}
+	cfg := DefaultConfig()
+	cfg.Audience = []string{"web"}
+	byOption := newTestAuthorizer(t, WithAudience(aud...))
+	byConfig := newTestAuthorizer(t, WithConfig(cfg))
+	aud[0], cfg.Audience[0] = "evil", "evil"
+
+	for name, tc := range map[string]struct {
+		a    *Authorizer
+		want string
+	}{"WithAudience": {byOption, "api"}, "WithConfig": {byConfig, "web"}} {
+		tok, _ := tc.a.IssueAccessToken("bob", nil)
+		c, err := tc.a.VerifyAccessToken(ctx, tok)
+		if err != nil || len(c.Audience) != 1 || c.Audience[0] != tc.want {
+			t.Errorf("%s: audience = %v, %v; want [%s]", name, c, err, tc.want)
+		}
+	}
+}
+
 func TestIssueAccessToken(t *testing.T) {
 	ctx := context.Background()
 	clock := newFakeClock()
@@ -853,6 +895,22 @@ func TestRefreshErrors(t *testing.T) {
 			if _, err := a.Refresh(ctx, signRaw(t, a, mc, nil)); !errors.Is(err, ErrInvalidToken) {
 				t.Errorf("%s: err = %v", name, err)
 			}
+		}
+	})
+
+	t.Run("provider returns reserved claim", func(t *testing.T) {
+		a := newRefreshAuthorizer(t, NewMemoryRefreshTokenStore(), WithRefreshReuseGrace(0))
+		pair, _ := a.IssueTokenPair(ctx, "bob", nil)
+		a.s.claimsProvider = func(context.Context, string) (map[string]any, error) {
+			return map[string]any{"sub": "admin"}, nil
+		}
+		if _, err := a.Refresh(ctx, pair.RefreshToken); !errors.Is(err, ErrReservedClaim) {
+			t.Errorf("err = %v; want ErrReservedClaim", err)
+		}
+		// The token was not consumed, so even in strict mode a retry works.
+		a.s.claimsProvider = nil
+		if _, err := a.Refresh(ctx, pair.RefreshToken); err != nil {
+			t.Errorf("retry after reserved-claim failure: %v", err)
 		}
 	})
 

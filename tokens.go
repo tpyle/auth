@@ -102,6 +102,12 @@ func checkExtraClaims(extra map[string]any) error {
 	return nil
 }
 
+// toNumericDate truncates t to the whole second, the resolution of JWT time
+// claims, so reported expiry times match what is encoded in the token.
+func toNumericDate(t time.Time) time.Time {
+	return time.Unix(t.Unix(), 0)
+}
+
 func (a *Authorizer) baseClaims(subject string, typ TokenType, id uuid.UUID, now, exp time.Time) jwt.MapClaims {
 	mc := jwt.MapClaims{
 		claimSubject:  subject,
@@ -149,7 +155,7 @@ func (a *Authorizer) issueAccess(ctx context.Context, subject string, extra map[
 		return "", time.Time{}, err
 	}
 	now := a.s.now()
-	exp := now.Add(a.s.AccessTokenTTL)
+	exp := toNumericDate(now.Add(a.s.AccessTokenTTL))
 	mc := a.baseClaims(subject, TokenTypeAccess, uuid.New(), now, exp)
 	for k, v := range extra {
 		mc[k] = v
@@ -162,7 +168,7 @@ func (a *Authorizer) issueAccess(ctx context.Context, subject string, extra map[
 // replacing parent (uuid.Nil for the first token of a login).
 func (a *Authorizer) issueRefresh(ctx context.Context, subject string, family, parent uuid.UUID) (string, time.Time, error) {
 	now := a.s.now()
-	exp := now.Add(a.s.RefreshTokenTTL)
+	exp := toNumericDate(now.Add(a.s.RefreshTokenTTL))
 	rec := RefreshTokenRecord{
 		ID:       uuid.New(),
 		ParentID: parent,

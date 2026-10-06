@@ -190,6 +190,11 @@ func (a *Authorizer) extraClaims(ctx context.Context, subject string) (map[strin
 	if err != nil {
 		return nil, fmt.Errorf("auth: claims provider: %w", err)
 	}
+	// Checked here, before Refresh consumes the token, so a misbehaving
+	// provider does not burn the client's refresh token.
+	if err := checkExtraClaims(extra); err != nil {
+		return nil, err
+	}
 	return extra, nil
 }
 
