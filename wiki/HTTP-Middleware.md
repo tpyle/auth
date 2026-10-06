@@ -7,9 +7,12 @@
 | Valid token | Claims added to the context, request continues | Claims added to the context, request continues |
 | Missing / invalid / expired token | Request continues **without** claims | `UnauthorizedHandler` is called (default: 401) |
 | Internal error (e.g. `KeyStore` down) | Logged, request continues without claims | Logged, `UnauthorizedHandler` is called (default: 500) |
-| Claims already in the context | Not checked again | Reused, not checked again |
+| Claims this `Authorizer` already verified | Reused, not checked again | Reused, not checked again |
+| Claims from anywhere else (another `Authorizer`, `ContextWithClaims`) | Replaced by this `Authorizer`'s result, or removed | Ignored; the request's token is verified |
 
 Use `AuthHandler` for routes where login is optional (pages that change when you are logged in). Use `RequireAuthHandler` for protected routes. You can stack them: wrap the whole mux in `AuthHandler` and individual routes in `RequireAuthHandler`, and each token is verified only once.
+
+Each `Authorizer` remembers which claims it verified itself. If an application has more than one (for example a user API and a stricter admin API with a different issuer), a permissive authorizer's middleware placed in front of a stricter one cannot satisfy the stricter `RequireAuthHandler`. After `AuthHandler` runs, the context holds exactly the claims that `Authorizer` verified, or none.
 
 Both are `func(http.Handler) http.Handler`, so they work with `net/http` and any router that accepts standard middleware.
 
@@ -31,6 +34,8 @@ claims, ok := auth.ClaimsFromContext(r.Context())   // *auth.Claims
 sub, ok := auth.SubjectFromContext(r.Context())     // claims.Subject
 ctx := auth.ContextWithClaims(ctx, claims)          // e.g. in tests
 ```
+
+Claims set with `ContextWithClaims` are visible to `ClaimsFromContext` (handy for unit-testing handlers), but the middleware never trusts them as verified.
 
 ## Default rejection response
 

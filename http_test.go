@@ -113,13 +113,31 @@ func TestAuthHandler(t *testing.T) {
 		})
 	}
 
-	t.Run("existing claims kept", func(t *testing.T) {
+	t.Run("own verified claims kept", func(t *testing.T) {
 		next := &claimsRecorder{}
 		r := request("garbage")
-		r = r.WithContext(ContextWithClaims(r.Context(), &Claims{Subject: "pre"}))
+		r = r.WithContext(a.withVerifiedClaims(r.Context(), &Claims{Subject: "pre"}))
 		a.AuthHandler(next).ServeHTTP(httptest.NewRecorder(), r)
 		if next.claims == nil || next.claims.Subject != "pre" {
 			t.Errorf("claims = %+v", next.claims)
+		}
+	})
+
+	t.Run("foreign claims removed", func(t *testing.T) {
+		for name, ctx := range map[string]context.Context{
+			"ContextWithClaims": ContextWithClaims(context.Background(), &Claims{Subject: "pre"}),
+			"other authorizer":  other.withVerifiedClaims(context.Background(), &Claims{Subject: "pre"}),
+		} {
+			next := &claimsRecorder{}
+			a.AuthHandler(next).ServeHTTP(httptest.NewRecorder(), request("garbage").WithContext(ctx))
+			if next.claims != nil {
+				t.Errorf("%s: foreign claims survived: %+v", name, next.claims)
+			}
+			next = &claimsRecorder{}
+			a.AuthHandler(next).ServeHTTP(httptest.NewRecorder(), request(pair.AccessToken).WithContext(ctx))
+			if next.claims == nil || next.claims.Subject != "bob" {
+				t.Errorf("%s: foreign claims not replaced: %+v", name, next.claims)
+			}
 		}
 	})
 }
@@ -178,13 +196,27 @@ func TestRequireAuthHandler(t *testing.T) {
 		})
 	}
 
-	t.Run("reuses claims from AuthHandler", func(t *testing.T) {
+	t.Run("reuses own verified claims", func(t *testing.T) {
 		next := &claimsRecorder{}
 		r := request("")
-		r = r.WithContext(ContextWithClaims(r.Context(), &Claims{Subject: "pre"}))
+		r = r.WithContext(a.withVerifiedClaims(r.Context(), &Claims{Subject: "pre"}))
 		a.RequireAuthHandler(next).ServeHTTP(httptest.NewRecorder(), r)
 		if !next.called || next.claims.Subject != "pre" {
-			t.Error("pre-verified claims were not accepted")
+			t.Error("claims verified by this authorizer were not reused")
+		}
+	})
+
+	t.Run("ignores claims it did not verify", func(t *testing.T) {
+		for name, ctx := range map[string]context.Context{
+			"ContextWithClaims": ContextWithClaims(context.Background(), &Claims{Subject: "pre"}),
+			"other authorizer":  other.withVerifiedClaims(context.Background(), &Claims{Subject: "pre"}),
+		} {
+			next := &claimsRecorder{}
+			rec := httptest.NewRecorder()
+			a.RequireAuthHandler(next).ServeHTTP(rec, request("").WithContext(ctx))
+			if next.called || rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s: request without a token passed (status %d)", name, rec.Code)
+			}
 		}
 	})
 
@@ -195,6 +227,29 @@ func TestRequireAuthHandler(t *testing.T) {
 			t.Errorf("claims = %+v", next.claims)
 		}
 	})
+}
+
+// A permissive authorizer's middleware in front of a stricter one must not
+// let its claims satisfy the stricter RequireAuthHandler.
+func TestNestedAuthorizers(t *testing.T) {
+	keys := NewMemoryKeyStore()
+	permissive := newTestAuthorizer(t, WithKeyStore(keys))
+	strict := newTestAuthorizer(t, WithKeyStore(keys), WithIssuer("admin"))
+	tok, _ := permissive.IssueAccessToken("bob", nil)
+
+	next := &claimsRecorder{}
+	rec := httptest.NewRecorder()
+	permissive.AuthHandler(strict.RequireAuthHandler(next)).ServeHTTP(rec, request(tok))
+	if next.called || rec.Code != http.StatusUnauthorized {
+		t.Errorf("strict RequireAuthHandler accepted the permissive authorizer's claims (status %d)", rec.Code)
+	}
+
+	adminTok, _ := strict.IssueAccessToken("alice", nil)
+	next = &claimsRecorder{}
+	permissive.AuthHandler(strict.RequireAuthHandler(next)).ServeHTTP(httptest.NewRecorder(), request(adminTok))
+	if next.claims == nil || next.claims.Subject != "alice" {
+		t.Errorf("valid admin token rejected: %+v", next.claims)
+	}
 }
 
 func TestCustomUnauthorizedHandler(t *testing.T) {

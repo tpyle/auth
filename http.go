@@ -15,16 +15,37 @@ const jwksMaxAge = 5 * time.Minute
 
 type claimsKey struct{}
 
-// ContextWithClaims returns a copy of ctx carrying c.
-func ContextWithClaims(ctx context.Context, c *Claims) context.Context {
-	return context.WithValue(ctx, claimsKey{}, c)
+// claimsValue records which Authorizer verified the claims, so middleware
+// only trusts claims that it verified itself.
+type claimsValue struct {
+	by     *Authorizer // nil if set with ContextWithClaims
+	claims *Claims
 }
 
-// ClaimsFromContext returns the claims stored by [Authorizer.AuthHandler] or
-// [Authorizer.RequireAuthHandler], if any.
+// ContextWithClaims returns a copy of ctx carrying c, for example to test
+// handlers that read [ClaimsFromContext]. Claims set this way are not
+// trusted by [Authorizer.RequireAuthHandler] or [Authorizer.AuthHandler],
+// which only reuse claims they verified themselves.
+func ContextWithClaims(ctx context.Context, c *Claims) context.Context {
+	return context.WithValue(ctx, claimsKey{}, claimsValue{claims: c})
+}
+
+// withVerifiedClaims returns a copy of ctx carrying c as verified by a.
+func (a *Authorizer) withVerifiedClaims(ctx context.Context, c *Claims) context.Context {
+	return context.WithValue(ctx, claimsKey{}, claimsValue{by: a, claims: c})
+}
+
+// verifiedClaims returns the claims in ctx only if a verified them.
+func (a *Authorizer) verifiedClaims(ctx context.Context) (*Claims, bool) {
+	v, _ := ctx.Value(claimsKey{}).(claimsValue)
+	return v.claims, v.by == a && v.claims != nil
+}
+
+// ClaimsFromContext returns the claims stored by [Authorizer.AuthHandler],
+// [Authorizer.RequireAuthHandler] or [ContextWithClaims], if any.
 func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
-	c, ok := ctx.Value(claimsKey{}).(*Claims)
-	return c, ok && c != nil
+	v, _ := ctx.Value(claimsKey{}).(claimsValue)
+	return v.claims, v.claims != nil
 }
 
 // SubjectFromContext returns the subject of the claims in ctx, if any.
@@ -72,16 +93,20 @@ func isClientError(err error) bool {
 // AuthHandler is middleware for optional authentication. If the request
 // carries a valid access token, its [Claims] are added to the request context
 // (see [ClaimsFromContext]); otherwise the request continues without them.
-// Internal errors are logged.
+// Afterwards the context holds exactly the claims this Authorizer verified:
+// claims placed there by another Authorizer or [ContextWithClaims] are
+// replaced or removed. Internal errors are logged.
 func (a *Authorizer) AuthHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := ClaimsFromContext(r.Context()); !ok {
+		if _, ok := a.verifiedClaims(r.Context()); !ok {
 			c, err := a.ClaimsFromRequest(r)
-			switch {
-			case err == nil:
-				r = r.WithContext(ContextWithClaims(r.Context(), c))
-			case !isClientError(err):
+			if err != nil && !isClientError(err) {
 				a.s.logger.ErrorContext(r.Context(), "auth: verifying request token", "error", err)
+			}
+			if err == nil {
+				r = r.WithContext(a.withVerifiedClaims(r.Context(), c))
+			} else if _, present := ClaimsFromContext(r.Context()); present {
+				r = r.WithContext(context.WithValue(r.Context(), claimsKey{}, claimsValue{}))
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -91,11 +116,12 @@ func (a *Authorizer) AuthHandler(next http.Handler) http.Handler {
 // RequireAuthHandler is middleware that rejects requests without a valid
 // access token, using the [UnauthorizedHandler] (by default a JSON 401 with a
 // WWW-Authenticate header). Accepted requests have their [Claims] in the
-// context. Claims already placed there by [Authorizer.AuthHandler] are
-// reused rather than verified again.
+// context. Claims this Authorizer already verified (for example in its
+// [Authorizer.AuthHandler]) are reused; claims from anywhere else are ignored
+// and the request's token is verified.
 func (a *Authorizer) RequireAuthHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := ClaimsFromContext(r.Context()); ok {
+		if _, ok := a.verifiedClaims(r.Context()); ok {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -107,7 +133,7 @@ func (a *Authorizer) RequireAuthHandler(next http.Handler) http.Handler {
 			a.s.unauthorized(w, r, err)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(ContextWithClaims(r.Context(), c)))
+		next.ServeHTTP(w, r.WithContext(a.withVerifiedClaims(r.Context(), c)))
 	})
 }
 

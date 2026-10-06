@@ -453,7 +453,9 @@ func TestExpiredTokenMustOtherwiseBeValid(t *testing.T) {
 	valid, _ := a.IssueAccessToken("bob", nil)
 
 	clock.Advance(time.Hour)
-	for name, tok := range map[string]string{"missing jti": noJTI, "wrong issuer": wrongIssuer} {
+	futureIat := signRaw(t, a, jwt.MapClaims{"sub": "bob", "iss": "me", "jti": uuid.NewString(), "typ": "access", "iat": now + 7200, "exp": now + 60}, nil)
+	futureNbf := signRaw(t, a, jwt.MapClaims{"sub": "bob", "iss": "me", "jti": uuid.NewString(), "typ": "access", "iat": now, "nbf": now + 7200, "exp": now + 60}, nil)
+	for name, tok := range map[string]string{"missing jti": noJTI, "wrong issuer": wrongIssuer, "future iat": futureIat, "future nbf": futureNbf} {
 		if _, err := a.VerifyAccessToken(ctx, tok); !errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrTokenExpired) {
 			t.Errorf("%s: err = %v; want only ErrInvalidToken", name, err)
 		}

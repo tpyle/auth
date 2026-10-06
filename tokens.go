@@ -232,10 +232,10 @@ func (a *Authorizer) parse(ctx context.Context, tokenString string, want TokenTy
 	switch {
 	case internalErr != nil:
 		return nil, internalErr
-	case errors.Is(err, jwt.ErrTokenExpired) && validateTimes:
-		// Only a token that would otherwise be valid is merely expired.
-		// Re-check everything except time (type, required claims, issuer,
-		// audience); any failure there makes it invalid instead.
+	case errors.Is(err, jwt.ErrTokenExpired) && validateTimes && !failedOtherClaimChecks(err):
+		// Only a token that would otherwise be valid is merely expired. The
+		// parser reported no claim failure besides expiry; re-check this
+		// package's own requirements (type, required claims) too.
 		if _, lenientErr := a.parse(ctx, tokenString, want, false); lenientErr != nil {
 			return nil, lenientErr
 		}
@@ -262,6 +262,28 @@ func (a *Authorizer) parse(ctx context.Context, tokenString string, want TokenTy
 		}
 	}
 	return c, nil
+}
+
+// otherClaimErrors are the claim validation failures besides expiry that the
+// parser can report. It reports every failure at once, joined.
+var otherClaimErrors = []error{
+	jwt.ErrTokenNotValidYet,
+	jwt.ErrTokenUsedBeforeIssued,
+	jwt.ErrTokenInvalidIssuer,
+	jwt.ErrTokenInvalidAudience,
+	jwt.ErrTokenInvalidSubject,
+	jwt.ErrTokenRequiredClaimMissing,
+}
+
+// failedOtherClaimChecks reports whether err includes a claim validation
+// failure other than expiry.
+func failedOtherClaimChecks(err error) bool {
+	for _, e := range otherClaimErrors {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkTokenType verifies that both the "typ" header and the "typ" claim
