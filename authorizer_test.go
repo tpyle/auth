@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"math"
-	"math/big"
 	"strings"
 	"sync"
 	"testing"
@@ -1088,7 +1087,7 @@ func TestJWKS(t *testing.T) {
 			if k.KeyID == t.Header["kid"] {
 				x, _ := base64.RawURLEncoding.DecodeString(k.X)
 				y, _ := base64.RawURLEncoding.DecodeString(k.Y)
-				return &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}, nil
+				return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
 			}
 		}
 		return nil, errors.New("kid not in JWKS")

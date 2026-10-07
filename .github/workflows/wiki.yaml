@@ -1,0 +1,57 @@
+name: Wiki
+
+# Publishes wiki/ to the repository's GitHub wiki. wiki/ is the source of
+# truth: edits made in the wiki's web editor are overwritten on the next sync.
+
+on:
+  push:
+    branches:
+      - trunk
+    paths:
+      - "wiki/**"
+      - ".github/workflows/wiki.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    name: Publish wiki
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Clone wiki
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki-repo; then
+            echo "::error::Wiki repository not found. Create the first wiki page in the GitHub UI once, then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Sync pages
+        run: |
+          find wiki-repo -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp wiki/*.md wiki-repo/
+          # GitHub wiki links omit the .md extension used for in-repo browsing.
+          sed -i -E 's/\]\(([A-Za-z0-9_-]+)\.md(#[^)]*)?\)/](\1\2)/g' wiki-repo/*.md
+
+      - name: Push changes
+        working-directory: wiki-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki is already up to date."
+            exit 0
+          fi
+          git commit -m "Sync wiki from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+          git push

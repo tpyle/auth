@@ -29,7 +29,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer a.Close()
+	defer func() {
+		if err := a.Close(); err != nil {
+			log.Printf("closing authorizer: %v", err)
+		}
+	}()
 
 	// Registration: hash the password and store it.
 	hash, err := a.HashPassword(ctx, []byte("correct horse battery staple"))

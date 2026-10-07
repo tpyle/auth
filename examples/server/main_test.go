@@ -22,7 +22,7 @@ func TestServerFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer func() { _ = a.Close() }()
 	hash, _ := a.HashPassword(ctx, []byte("password"))
 	users.SetPasswordHash("alice", hash)
 	srv := httptest.NewServer(newMux(a))
@@ -38,7 +38,7 @@ func TestServerFlow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		var out map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&out)
 		return resp, out

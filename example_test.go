@@ -34,7 +34,11 @@ func ExampleAuthorizer_Login() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer a.Close()
+	defer func() {
+		if err := a.Close(); err != nil {
+			log.Printf("closing authorizer: %v", err)
+		}
+	}()
 
 	hash, _ := a.HashPassword(ctx, []byte("s3cret"))
 	users.SetPasswordHash("alice", hash)
@@ -76,13 +80,17 @@ func ExampleAuthorizer_RequireAuthHandler() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer a.Close()
+	defer func() {
+		if err := a.Close(); err != nil {
+			log.Printf("closing authorizer: %v", err)
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /.well-known/jwks.json", a.JWKSHandler())
 	mux.Handle("GET /me", a.RequireAuthHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sub, _ := auth.SubjectFromContext(r.Context())
-		fmt.Fprintf(w, "hello, %s\n", sub)
+		_, _ = fmt.Fprintf(w, "hello, %s\n", sub)
 	})))
 	_ = mux // pass to http.ListenAndServe
 }

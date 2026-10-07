@@ -31,7 +31,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer a.Close()
+	defer func() {
+		if err := a.Close(); err != nil {
+			log.Printf("closing authorizer: %v", err)
+		}
+	}()
 
 	hash, err := a.HashPassword(ctx, []byte("password"))
 	if err != nil {
