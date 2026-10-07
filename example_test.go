@@ -94,3 +94,28 @@ func ExampleAuthorizer_RequireAuthHandler() {
 	})))
 	_ = mux // pass to http.ListenAndServe
 }
+
+// With RefreshPurgeInterval set to 0, expired refresh tokens are only purged
+// when PurgeExpiredRefreshTokens is called, for example from a scheduled job.
+func ExampleAuthorizer_PurgeExpiredRefreshTokens() {
+	ctx := context.Background()
+	a, err := auth.New(ctx,
+		auth.WithRefreshTokenStore(auth.NewMemoryRefreshTokenStore()),
+		auth.WithRefreshPurgeInterval(0),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := a.Close(); err != nil {
+			log.Printf("closing authorizer: %v", err)
+		}
+	}()
+
+	n, err := a.PurgeExpiredRefreshTokens(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("purged:", n)
+	// Output: purged: 0
+}

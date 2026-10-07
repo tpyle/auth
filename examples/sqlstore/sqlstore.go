@@ -61,6 +61,7 @@ var (
 	_ auth.PasswordHashUpdater = (*Store)(nil)
 	_ auth.KeyStore            = (*Store)(nil)
 	_ auth.RefreshTokenStore   = (*Store)(nil)
+	_ auth.RefreshTokenPurger  = (*Store)(nil)
 )
 
 // Store implements every auth store interface on one *sql.DB.
@@ -235,21 +236,43 @@ func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject strin
 	})
 }
 
-// PurgeExpiredRefreshTokens deletes expired families (with their tokens)
-// and expired tokens. Run it periodically (for example hourly); the auth
-// package never deletes expired records itself.
+// purgeBatchSize is how many rows each DELETE in PurgeExpiredRefreshTokens
+// removes, so a large backlog is cleared in short statements rather than one
+// long one.
+const purgeBatchSize = 1000
+
+// PurgeExpiredRefreshTokens implements auth.RefreshTokenPurger. It deletes
+// expired tokens and then expired families in batches. The Authorizer calls
+// it every Config.RefreshPurgeInterval.
+//
+// Tokens go first: a family expires only after all of its tokens, so by the
+// time it is deleted its ON DELETE CASCADE has little or nothing left to
+// remove. SKIP LOCKED leaves rows that a refresh or another instance's purge
+// has locked; they are picked up by a later purge.
 func (s *Store) PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error) {
 	var total int64
 	for _, q := range []string{
-		`DELETE FROM refresh_families WHERE expires_at < $1`,
-		`DELETE FROM refresh_tokens WHERE expires_at < $1`,
+		`DELETE FROM refresh_tokens WHERE id IN (
+			SELECT id FROM refresh_tokens WHERE expires_at < $1
+			LIMIT $2 FOR UPDATE SKIP LOCKED)`,
+		`DELETE FROM refresh_families WHERE id IN (
+			SELECT id FROM refresh_families WHERE expires_at < $1
+			LIMIT $2 FOR UPDATE SKIP LOCKED)`,
 	} {
-		res, err := s.DB.ExecContext(ctx, q, now)
-		if err != nil {
-			return total, err
+		for {
+			res, err := s.DB.ExecContext(ctx, q, now, purgeBatchSize)
+			if err != nil {
+				return total, err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return total, err
+			}
+			total += n
+			if n < purgeBatchSize {
+				break
+			}
 		}
-		n, _ := res.RowsAffected()
-		total += n
 	}
 	return total, nil
 }
