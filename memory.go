@@ -107,14 +107,20 @@ func (s *MemoryKeyStore) DeleteKeys(_ context.Context, ids []uuid.UUID) error {
 	return nil
 }
 
+// memoryPurgeInterval is the least time between the purges
+// [MemoryRefreshTokenStore] runs when creating tokens.
+const memoryPurgeInterval = time.Minute
+
 // MemoryRefreshTokenStore is an in-memory [RefreshTokenStore] and
 // [RefreshTokenPurger] intended for tests and single-instance deployments.
-// Expired records and families are also purged whenever a new token is
-// created.
+// It also purges records and families that expired more than a few minutes
+// ago when a token is created, at most once a minute, so it stays bounded
+// even with background purging disabled.
 type MemoryRefreshTokenStore struct {
-	mu       sync.Mutex
-	records  map[uuid.UUID]RefreshTokenRecord
-	families map[uuid.UUID]*memoryFamily
+	mu        sync.Mutex
+	records   map[uuid.UUID]RefreshTokenRecord
+	families  map[uuid.UUID]*memoryFamily
+	lastPurge time.Time // IssuedAt of the create that last purged
 }
 
 type memoryFamily struct {
@@ -139,7 +145,11 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 	defer s.mu.Unlock()
 	// Purge relative to the new record's issue time rather than the wall
 	// clock, so the store follows the Authorizer's clock (see WithClock).
-	s.purgeLocked(rec.IssuedAt)
+	// The margin matches the Authorizer's, for the same reason.
+	if s.lastPurge.IsZero() || !rec.IssuedAt.Before(s.lastPurge.Add(memoryPurgeInterval)) {
+		s.purgeLocked(rec.IssuedAt.Add(-refreshPurgeMargin))
+		s.lastPurge = rec.IssuedAt
+	}
 
 	f := s.families[rec.FamilyID]
 	switch {

@@ -172,8 +172,10 @@ type RefreshTokenStore interface {
 // [Config.RefreshPurgeInterval], and [Authorizer.PurgeExpiredRefreshTokens]
 // calls it on demand.
 //
-// Several instances may purge the same store at the same time, so
-// implementations must tolerate concurrent calls.
+// The Authorizer passes a time a few minutes in the past, so records
+// outlive their expiry briefly and a refresh accepted just before expiry
+// can still complete. Several instances may purge the same store at the
+// same time, so implementations must tolerate concurrent calls.
 type RefreshTokenPurger interface {
 	// PurgeExpiredRefreshTokens deletes every record whose ExpiresAt is
 	// before now, and forgets every family (revoked or not) whose tokens

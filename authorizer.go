@@ -83,8 +83,8 @@ func New(ctx context.Context, opts ...Option) (*Authorizer, error) {
 	}
 	firstWait := km.firstWait()
 	a.bg.Go(func() { km.run(runCtx, firstWait) })
-	if _, ok := s.backgroundPurger(); ok {
-		a.bg.Go(func() { a.runPurge(runCtx, jitter) })
+	if p, ok := s.backgroundPurger(); ok {
+		a.bg.Go(func() { a.runPurge(runCtx, p, jitter) })
 	}
 	return a, nil
 }
