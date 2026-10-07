@@ -166,3 +166,18 @@ type RefreshTokenStore interface {
 	// completes. Revoking a subject with no families is not an error.
 	RevokeRefreshTokensForSubject(ctx context.Context, subject string) error
 }
+
+// RefreshTokenPurger is an optional extension of [RefreshTokenStore]. If the
+// store implements it, each [Authorizer] calls it every
+// [Config.RefreshPurgeInterval], and [Authorizer.PurgeExpiredRefreshTokens]
+// calls it on demand.
+//
+// Several instances may purge the same store at the same time, so
+// implementations must tolerate concurrent calls.
+type RefreshTokenPurger interface {
+	// PurgeExpiredRefreshTokens deletes every record whose ExpiresAt is
+	// before now, and forgets every family (revoked or not) whose tokens
+	// have all expired by then. It returns how many records and families
+	// were removed; the count is used only for logging.
+	PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error)
+}

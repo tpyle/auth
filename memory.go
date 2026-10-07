@@ -107,9 +107,10 @@ func (s *MemoryKeyStore) DeleteKeys(_ context.Context, ids []uuid.UUID) error {
 	return nil
 }
 
-// MemoryRefreshTokenStore is an in-memory [RefreshTokenStore] intended for
-// tests and single-instance deployments. Expired records and families are
-// purged whenever a new token is created.
+// MemoryRefreshTokenStore is an in-memory [RefreshTokenStore] and
+// [RefreshTokenPurger] intended for tests and single-instance deployments.
+// Expired records and families are also purged whenever a new token is
+// created.
 type MemoryRefreshTokenStore struct {
 	mu       sync.Mutex
 	records  map[uuid.UUID]RefreshTokenRecord
@@ -121,6 +122,8 @@ type memoryFamily struct {
 	revoked   bool
 	expiresAt time.Time // latest expiry of any token in the family
 }
+
+var _ RefreshTokenPurger = (*MemoryRefreshTokenStore)(nil)
 
 // NewMemoryRefreshTokenStore returns an empty [MemoryRefreshTokenStore].
 func NewMemoryRefreshTokenStore() *MemoryRefreshTokenStore {
@@ -136,17 +139,7 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 	defer s.mu.Unlock()
 	// Purge relative to the new record's issue time rather than the wall
 	// clock, so the store follows the Authorizer's clock (see WithClock).
-	now := rec.IssuedAt
-	for id, r := range s.records {
-		if now.After(r.ExpiresAt) {
-			delete(s.records, id)
-		}
-	}
-	for id, f := range s.families {
-		if now.After(f.expiresAt) {
-			delete(s.families, id)
-		}
-	}
+	s.purgeLocked(rec.IssuedAt)
 
 	f := s.families[rec.FamilyID]
 	switch {
@@ -161,6 +154,32 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 	}
 	s.records[rec.ID] = rec
 	return nil
+}
+
+// PurgeExpiredRefreshTokens implements [RefreshTokenPurger].
+func (s *MemoryRefreshTokenStore) PurgeExpiredRefreshTokens(_ context.Context, now time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.purgeLocked(now), nil
+}
+
+// purgeLocked deletes records and families that expired before now and
+// returns how many it removed.
+func (s *MemoryRefreshTokenStore) purgeLocked(now time.Time) int64 {
+	var n int64
+	for id, r := range s.records {
+		if now.After(r.ExpiresAt) {
+			delete(s.records, id)
+			n++
+		}
+	}
+	for id, f := range s.families {
+		if now.After(f.expiresAt) {
+			delete(s.families, id)
+			n++
+		}
+	}
+	return n
 }
 
 // ConsumeRefreshToken implements [RefreshTokenStore].

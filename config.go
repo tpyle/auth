@@ -52,6 +52,13 @@ type Config struct {
 	// retry after a lost response. A reuse after the window revokes the
 	// session. Zero disables the grace period.
 	RefreshReuseGrace time.Duration `mapstructure:"refresh_reuse_grace"`
+	// RefreshPurgeInterval is roughly how often expired refresh-token
+	// records are deleted in the background, if the [RefreshTokenStore]
+	// implements [RefreshTokenPurger]. Each wait is randomized by up to 25%
+	// either way, so instances sharing a store do not purge in lockstep.
+	// Zero disables background purging; call
+	// [Authorizer.PurgeExpiredRefreshTokens] or purge the store yourself.
+	RefreshPurgeInterval time.Duration `mapstructure:"refresh_purge_interval"`
 
 	// KeyRotationInterval is how often this process switches to a new
 	// signing key. Each key is stored one interval before it starts signing,
@@ -86,15 +93,16 @@ type Config struct {
 func DefaultConfig() Config {
 	argon := DefaultArgon2Params()
 	return Config{
-		Argon2:              argon,
-		Argon2Limits:        DefaultArgon2Limits(),
-		MaxConcurrentHashes: max(1, runtime.GOMAXPROCS(0)/int(argon.Parallelism)),
-		AccessTokenTTL:      15 * time.Minute,
-		RefreshTokenTTL:     7 * 24 * time.Hour,
-		RefreshReuseGrace:   30 * time.Second,
-		KeyRotationInterval: 24 * time.Hour,
-		KeyCacheTTL:         5 * time.Minute,
-		AuthHeader:          "Authorization",
+		Argon2:               argon,
+		Argon2Limits:         DefaultArgon2Limits(),
+		MaxConcurrentHashes:  max(1, runtime.GOMAXPROCS(0)/int(argon.Parallelism)),
+		AccessTokenTTL:       15 * time.Minute,
+		RefreshTokenTTL:      7 * 24 * time.Hour,
+		RefreshReuseGrace:    30 * time.Second,
+		RefreshPurgeInterval: time.Hour,
+		KeyRotationInterval:  24 * time.Hour,
+		KeyCacheTTL:          5 * time.Minute,
+		AuthHeader:           "Authorization",
 	}
 }
 
@@ -122,6 +130,9 @@ func (c Config) Validate() error {
 	}
 	if c.RefreshReuseGrace < 0 {
 		errs = append(errs, errors.New("auth: RefreshReuseGrace must not be negative"))
+	}
+	if c.RefreshPurgeInterval < 0 {
+		errs = append(errs, errors.New("auth: RefreshPurgeInterval must not be negative"))
 	}
 	if c.KeyRotationInterval < 0 {
 		errs = append(errs, errors.New("auth: KeyRotationInterval must not be negative"))
@@ -220,6 +231,12 @@ func WithRefreshReuseGrace(d time.Duration) Option {
 	return func(s *settings) { s.RefreshReuseGrace = d }
 }
 
+// WithRefreshPurgeInterval sets [Config.RefreshPurgeInterval]. Pass 0 to
+// disable background purging.
+func WithRefreshPurgeInterval(d time.Duration) Option {
+	return func(s *settings) { s.RefreshPurgeInterval = d }
+}
+
 // WithKeyRotationInterval sets [Config.KeyRotationInterval].
 func WithKeyRotationInterval(d time.Duration) Option {
 	return func(s *settings) { s.KeyRotationInterval = d }
@@ -262,7 +279,7 @@ func WithUnauthorizedHandler(h UnauthorizedHandler) Option {
 }
 
 // WithLogger sets the logger used for errors in background work such as key
-// rotation. Defaults to [slog.Default].
+// rotation and refresh-token purging. Defaults to [slog.Default].
 func WithLogger(l *slog.Logger) Option {
 	return func(s *settings) { s.logger = l }
 }

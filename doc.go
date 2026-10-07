@@ -14,8 +14,10 @@
 //
 // Persistence is supplied by the caller through small interfaces
 // ([UserStore], [KeyStore], [RefreshTokenStore]). In-memory implementations
-// are provided for tests and single-instance deployments.
+// are provided for tests and single-instance deployments. A refresh-token
+// store that also implements [RefreshTokenPurger] has its expired records
+// deleted in the background (see [Config.RefreshPurgeInterval]).
 //
 // An [Authorizer] is created with [New] and must be released with
-// [Authorizer.Close], which stops background key rotation.
+// [Authorizer.Close], which stops background key rotation and purging.
 package auth

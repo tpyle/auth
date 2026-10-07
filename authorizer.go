@@ -34,11 +34,12 @@ type Authorizer struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 	cancel    context.CancelFunc
-	done      chan struct{}
+	bg        sync.WaitGroup // background key rotation and purging
 }
 
 // New validates the options, creates and stores the first signing key, and
-// starts background key rotation. ctx bounds only this initialization; the
+// starts background key rotation and, if the [RefreshTokenStore] supports
+// it, refresh-token purging. ctx bounds only this initialization; the
 // background work runs until [Authorizer.Close] is called.
 func New(ctx context.Context, opts ...Option) (*Authorizer, error) {
 	s, err := buildSettings(opts)
@@ -79,23 +80,23 @@ func New(ctx context.Context, opts ...Option) (*Authorizer, error) {
 		lenientParser: jwt.NewParser(append(common, jwt.WithoutClaimsValidation())...),
 		hashSem:       make(chan struct{}, s.MaxConcurrentHashes),
 		cancel:        cancel,
-		done:          make(chan struct{}),
 	}
 	firstWait := km.firstWait()
-	go func() {
-		defer close(a.done)
-		km.run(runCtx, firstWait)
-	}()
+	a.bg.Go(func() { km.run(runCtx, firstWait) })
+	if _, ok := s.backgroundPurger(); ok {
+		a.bg.Go(func() { a.runPurge(runCtx, jitter) })
+	}
 	return a, nil
 }
 
-// Close stops key rotation and waits for it to finish. Afterwards, tokens can
-// still be verified but no new tokens are issued. Close is idempotent.
+// Close stops background key rotation and purging and waits for them to
+// finish. Afterwards, tokens can still be verified but no new tokens are
+// issued. Close is idempotent.
 func (a *Authorizer) Close() error {
 	a.closeOnce.Do(func() {
 		a.closed.Store(true)
 		a.cancel()
-		<-a.done
+		a.bg.Wait()
 	})
 	return nil
 }

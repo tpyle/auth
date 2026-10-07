@@ -22,7 +22,8 @@ Upgrading from v1? See [wiki/Migrating-from-v1.md](wiki/Migrating-from-v1.md).
   short grace period keeps concurrent refreshes (several browser tabs, a
   retried request) from logging users out. Access and refresh tokens can't be
   swapped for each other. `RevokeAllSessions` signs a user out everywhere,
-  for example after a password change.
+  for example after a password change. Expired refresh-token records are
+  purged in the background if your store implements `RefreshTokenPurger`.
 - **Keys**: signing keys rotate automatically and are published one rotation
   interval before they start signing. Private keys never leave the process;
   only public keys are stored, so any number of instances can verify each

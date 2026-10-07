@@ -131,14 +131,30 @@ Contract:
 
 ### Purging expired records
 
-The library never deletes a record or a family just because it expired. Logout and reuse detection delete a family's records, but the family row stays (marked revoked). A session that is simply abandoned leaves its last record, any used ones, and its family in the store for good. Purge expired families and records on a schedule, for example hourly. With the schema below:
+Logout and reuse detection delete a family's records, but the family row stays (marked revoked). A session that is simply abandoned leaves its last record, any used ones, and its family in the store until they are purged.
+
+The easiest way to purge is to implement the optional `RefreshTokenPurger` interface on your store:
+
+```go
+type RefreshTokenPurger interface {
+	// Delete records whose ExpiresAt is before now, and forget families whose
+	// tokens have all expired by then. The count is only used for logging.
+	PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error)
+}
+```
+
+If the store implements it, every `Authorizer` calls it in the background about every `RefreshPurgeInterval` (default `1h`, randomized by ±25%), with `now` taken from the `Authorizer`'s clock. Several instances may purge the same store at once, so the method must tolerate concurrent calls. Deleting by expiry time already does. Failures are logged as warnings and retried on the next run. The number of removed rows is logged at debug level. `Close` stops the loop and cancels a purge that is in progress.
+
+To purge on your own schedule instead, for example from a cron job, set `RefreshPurgeInterval` to `0` and call `Authorizer.PurgeExpiredRefreshTokens(ctx)`. It returns `ErrNotConfigured` if the store does not implement `RefreshTokenPurger`, and it still works after `Close`.
+
+If your store does not implement the interface, purge it yourself, either with a scheduled job or with your database's TTL feature (Redis `EXPIREAT`, MongoDB TTL indexes, DynamoDB TTL, and so on). Expire records at `ExpiresAt`, not at the token's `exp`, and never expire a family before its last token. With the schema below:
 
 ```sql
 DELETE FROM refresh_families WHERE expires_at < now();  -- cascades to their tokens
 DELETE FROM refresh_tokens   WHERE expires_at < now();
 ```
 
-This is safe. A record's `ExpiresAt` is the token's `exp` **plus `Leeway`**, the moment the token can no longer be accepted, so after it the record is not needed. Purging on `ExpiresAt` keeps records, and the tombstones of revoked families, through the leeway window. A family's `expires_at` is the latest `ExpiresAt` of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. A refresh that was stalled past that point cannot recreate the purged family, because continuing a missing family fails (see `ParentID` above). `MemoryRefreshTokenStore` purges expired records and families on every `CreateRefreshToken`.
+This is safe. A record's `ExpiresAt` is the token's `exp` **plus `Leeway`**, the moment the token can no longer be accepted, so after it the record is not needed. Purging on `ExpiresAt` keeps records, and the tombstones of revoked families, through the leeway window. A family's `expires_at` is the latest `ExpiresAt` of any of its tokens, so once it has passed no token of that family can be presented, and its revoked flag is no longer needed either. A refresh that was stalled past that point cannot recreate the purged family, because continuing a missing family fails (see `ParentID` above). `MemoryRefreshTokenStore` implements `RefreshTokenPurger`, and also purges expired records and families on every `CreateRefreshToken`.
 
 ## PostgreSQL
 
@@ -319,7 +335,7 @@ a, err := auth.New(ctx,
 )
 ```
 
-The example also has `PurgeExpiredRefreshTokens(ctx, now)`, which deletes expired families (with their tokens) and expired tokens. Run it periodically.
+The example also implements `RefreshTokenPurger` with the two `DELETE` statements above, so each `Authorizer` purges it in the background.
 
 
 ## In-memory implementations
@@ -328,7 +344,7 @@ The example also has `PurgeExpiredRefreshTokens(ctx, now)`, which deletes expire
 |---|---|---|
 | `MemoryUserStore` (`NewMemoryUserStore()`) | `UserStore`, `PasswordHashUpdater` | `SetPasswordHash(username, hash)` adds a user or replaces one. `UpdatePasswordHash` is a compare-and-swap. |
 | `MemoryKeyStore` (`NewMemoryKeyStore()`) | `KeyStore` | Used automatically when no `KeyStore` is given. Keeps keys in encoded (PKIX DER) form, like a database would, and `StoreKey` rejects a key without a `PublicKey`. |
-| `MemoryRefreshTokenStore` (`NewMemoryRefreshTokenStore()`) | `RefreshTokenStore` | Tracks families and their revoked state under one mutex, so creation and revocation are atomic. A refresh into a family it no longer knows is rejected with `ErrTokenRevoked`. Purges expired records and families on every `CreateRefreshToken`. `Len()` reports how many records it holds, including used ones (families are not counted). |
+| `MemoryRefreshTokenStore` (`NewMemoryRefreshTokenStore()`) | `RefreshTokenStore`, `RefreshTokenPurger` | Tracks families and their revoked state under one mutex, so creation and revocation are atomic. A refresh into a family it no longer knows is rejected with `ErrTokenRevoked`. Purges expired records and families on every `CreateRefreshToken`. `Len()` reports how many records it holds, including used ones (families are not counted). |
 
 All of them are safe for concurrent use. They never keep caller-owned pointers, so changing a value after passing it in does not affect the store.
 

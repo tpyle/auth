@@ -61,6 +61,7 @@ var (
 	_ auth.PasswordHashUpdater = (*Store)(nil)
 	_ auth.KeyStore            = (*Store)(nil)
 	_ auth.RefreshTokenStore   = (*Store)(nil)
+	_ auth.RefreshTokenPurger  = (*Store)(nil)
 )
 
 // Store implements every auth store interface on one *sql.DB.
@@ -235,9 +236,9 @@ func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject strin
 	})
 }
 
-// PurgeExpiredRefreshTokens deletes expired families (with their tokens)
-// and expired tokens. Run it periodically (for example hourly); the auth
-// package never deletes expired records itself.
+// PurgeExpiredRefreshTokens implements auth.RefreshTokenPurger. It deletes
+// expired families (with their tokens) and expired tokens. The Authorizer
+// calls it every Config.RefreshPurgeInterval.
 func (s *Store) PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error) {
 	var total int64
 	for _, q := range []string{

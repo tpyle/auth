@@ -27,17 +27,19 @@ func TestConfigValidate(t *testing.T) {
 		"subsecond access ttl":  func(c *Config) { c.AccessTokenTTL = 999 * time.Millisecond },
 		"subsecond refresh ttl": func(c *Config) { c.RefreshTokenTTL = 999 * time.Millisecond },
 		"reuse grace":           func(c *Config) { c.RefreshReuseGrace = -time.Second },
+		"purge interval":        func(c *Config) { c.RefreshPurgeInterval = -time.Second },
 		"rotation":              func(c *Config) { c.KeyRotationInterval = -time.Second },
 		"key cache ttl":         func(c *Config) { c.KeyCacheTTL = -time.Second },
 		"leeway":                func(c *Config) { c.Leeway = -time.Second },
 		"rotation zero":         nil, // valid: disables rotation
 		"cache ttl zero":        nil, // valid: disables caching
+		"purge interval zero":   nil, // valid: disables background purging
 	}
 	for name, modify := range tests {
 		t.Run(name, func(t *testing.T) {
 			c := DefaultConfig()
 			if modify == nil {
-				c.KeyRotationInterval, c.KeyCacheTTL = 0, 0
+				c.KeyRotationInterval, c.KeyCacheTTL, c.RefreshPurgeInterval = 0, 0, 0
 				if err := c.Validate(); err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
@@ -105,6 +107,7 @@ func TestOptions(t *testing.T) {
 		WithAccessTokenTTL(time.Minute),
 		WithRefreshTokenTTL(time.Hour),
 		WithRefreshReuseGrace(time.Minute),
+		WithRefreshPurgeInterval(3 * time.Minute),
 		WithKeyRotationInterval(2 * time.Hour),
 		WithKeyCacheTTL(time.Second),
 		WithIssuer("iss"),
@@ -120,19 +123,20 @@ func TestOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{
-		Argon2:              testArgon2,
-		Argon2Limits:        testArgon2,
-		MaxConcurrentHashes: 3,
-		AccessTokenTTL:      time.Minute,
-		RefreshTokenTTL:     time.Hour,
-		RefreshReuseGrace:   time.Minute,
-		KeyRotationInterval: 2 * time.Hour,
-		KeyCacheTTL:         time.Second,
-		Issuer:              "iss",
-		Audience:            []string{"a", "b"},
-		Leeway:              5 * time.Second,
-		AuthHeader:          "X-Token",
-		AuthCookie:          "session",
+		Argon2:               testArgon2,
+		Argon2Limits:         testArgon2,
+		MaxConcurrentHashes:  3,
+		AccessTokenTTL:       time.Minute,
+		RefreshTokenTTL:      time.Hour,
+		RefreshReuseGrace:    time.Minute,
+		RefreshPurgeInterval: 3 * time.Minute,
+		KeyRotationInterval:  2 * time.Hour,
+		KeyCacheTTL:          time.Second,
+		Issuer:               "iss",
+		Audience:             []string{"a", "b"},
+		Leeway:               5 * time.Second,
+		AuthHeader:           "X-Token",
+		AuthCookie:           "session",
 	}
 	if !reflect.DeepEqual(s.Config, want) {
 		t.Errorf("Config = %+v\nwant %+v", s.Config, want)
