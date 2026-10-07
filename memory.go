@@ -146,7 +146,9 @@ func (s *MemoryRefreshTokenStore) CreateRefreshToken(_ context.Context, rec Refr
 	// Purge relative to the new record's issue time rather than the wall
 	// clock, so the store follows the Authorizer's clock (see WithClock).
 	// The margin matches the Authorizer's, for the same reason.
-	if s.lastPurge.IsZero() || !rec.IssuedAt.Before(s.lastPurge.Add(memoryPurgeInterval)) {
+	// A clock that moved backwards also purges, so purging resumes at once.
+	if s.lastPurge.IsZero() || rec.IssuedAt.Before(s.lastPurge) ||
+		!rec.IssuedAt.Before(s.lastPurge.Add(memoryPurgeInterval)) {
 		s.purgeLocked(rec.IssuedAt.Add(-refreshPurgeMargin))
 		s.lastPurge = rec.IssuedAt
 	}

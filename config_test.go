@@ -17,23 +17,25 @@ func TestDefaultConfigIsValid(t *testing.T) {
 
 func TestConfigValidate(t *testing.T) {
 	tests := map[string]func(*Config){
-		"argon2":                func(c *Config) { c.Argon2.Iterations = 0 },
-		"argon2 over limits":    func(c *Config) { c.Argon2Limits.MemoryKiB = c.Argon2.MemoryKiB - 1 },
-		"key limit too big":     func(c *Config) { c.Argon2Limits.KeyLength = 1025 },
-		"salt limit too big":    func(c *Config) { c.Argon2Limits.SaltLength = 1025 },
-		"max hashes":            func(c *Config) { c.MaxConcurrentHashes = 0 },
-		"access ttl":            func(c *Config) { c.AccessTokenTTL = 0 },
-		"refresh ttl":           func(c *Config) { c.RefreshTokenTTL = -time.Second },
-		"subsecond access ttl":  func(c *Config) { c.AccessTokenTTL = 999 * time.Millisecond },
-		"subsecond refresh ttl": func(c *Config) { c.RefreshTokenTTL = 999 * time.Millisecond },
-		"reuse grace":           func(c *Config) { c.RefreshReuseGrace = -time.Second },
-		"purge interval":        func(c *Config) { c.RefreshPurgeInterval = -time.Second },
-		"rotation":              func(c *Config) { c.KeyRotationInterval = -time.Second },
-		"key cache ttl":         func(c *Config) { c.KeyCacheTTL = -time.Second },
-		"leeway":                func(c *Config) { c.Leeway = -time.Second },
-		"rotation zero":         nil, // valid: disables rotation
-		"cache ttl zero":        nil, // valid: disables caching
-		"purge interval zero":   nil, // valid: disables background purging
+		"argon2":                 func(c *Config) { c.Argon2.Iterations = 0 },
+		"argon2 over limits":     func(c *Config) { c.Argon2Limits.MemoryKiB = c.Argon2.MemoryKiB - 1 },
+		"key limit too big":      func(c *Config) { c.Argon2Limits.KeyLength = 1025 },
+		"salt limit too big":     func(c *Config) { c.Argon2Limits.SaltLength = 1025 },
+		"max hashes":             func(c *Config) { c.MaxConcurrentHashes = 0 },
+		"access ttl":             func(c *Config) { c.AccessTokenTTL = 0 },
+		"refresh ttl":            func(c *Config) { c.RefreshTokenTTL = -time.Second },
+		"subsecond access ttl":   func(c *Config) { c.AccessTokenTTL = 999 * time.Millisecond },
+		"subsecond refresh ttl":  func(c *Config) { c.RefreshTokenTTL = 999 * time.Millisecond },
+		"reuse grace":            func(c *Config) { c.RefreshReuseGrace = -time.Second },
+		"purge interval":         func(c *Config) { c.RefreshPurgeInterval = -time.Second },
+		"purge interval too low": func(c *Config) { c.RefreshPurgeInterval = time.Minute - 1 },
+		"unitless purge":         func(c *Config) { c.RefreshPurgeInterval = 3600 },
+		"rotation":               func(c *Config) { c.KeyRotationInterval = -time.Second },
+		"key cache ttl":          func(c *Config) { c.KeyCacheTTL = -time.Second },
+		"leeway":                 func(c *Config) { c.Leeway = -time.Second },
+		"rotation zero":          nil, // valid: disables rotation
+		"cache ttl zero":         nil, // valid: disables caching
+		"purge interval zero":    nil, // valid: disables background purging
 	}
 	for name, modify := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -165,5 +167,13 @@ func TestWithConfigThenOverride(t *testing.T) {
 	}
 	if s.Issuer != "override" || s.AccessTokenTTL != time.Hour {
 		t.Errorf("got issuer %q ttl %v", s.Issuer, s.AccessTokenTTL)
+	}
+}
+
+func TestMinimumRefreshPurgeInterval(t *testing.T) {
+	c := DefaultConfig()
+	c.RefreshPurgeInterval = minRefreshPurgeInterval
+	if err := c.Validate(); err != nil {
+		t.Errorf("RefreshPurgeInterval = %v rejected: %v", c.RefreshPurgeInterval, err)
 	}
 }

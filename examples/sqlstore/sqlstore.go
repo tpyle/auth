@@ -242,19 +242,21 @@ func (s *Store) RevokeRefreshTokensForSubject(ctx context.Context, subject strin
 const purgeBatchSize = 1000
 
 // PurgeExpiredRefreshTokens implements auth.RefreshTokenPurger. It deletes
-// expired families (with their tokens) and expired tokens in batches. The
-// Authorizer calls it every Config.RefreshPurgeInterval.
+// expired tokens and then expired families in batches. The Authorizer calls
+// it every Config.RefreshPurgeInterval.
 //
-// SKIP LOCKED leaves rows that a refresh or another instance's purge has
-// locked; they are picked up by a later purge.
+// Tokens go first: a family expires only after all of its tokens, so by the
+// time it is deleted its ON DELETE CASCADE has little or nothing left to
+// remove. SKIP LOCKED leaves rows that a refresh or another instance's purge
+// has locked; they are picked up by a later purge.
 func (s *Store) PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error) {
 	var total int64
 	for _, q := range []string{
-		`DELETE FROM refresh_families WHERE id IN (
-			SELECT id FROM refresh_families WHERE expires_at < $1
-			LIMIT $2 FOR UPDATE SKIP LOCKED)`,
 		`DELETE FROM refresh_tokens WHERE id IN (
 			SELECT id FROM refresh_tokens WHERE expires_at < $1
+			LIMIT $2 FOR UPDATE SKIP LOCKED)`,
+		`DELETE FROM refresh_families WHERE id IN (
+			SELECT id FROM refresh_families WHERE expires_at < $1
 			LIMIT $2 FOR UPDATE SKIP LOCKED)`,
 	} {
 		for {
@@ -262,7 +264,10 @@ func (s *Store) PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (i
 			if err != nil {
 				return total, err
 			}
-			n, _ := res.RowsAffected()
+			n, err := res.RowsAffected()
+			if err != nil {
+				return total, err
+			}
 			total += n
 			if n < purgeBatchSize {
 				break

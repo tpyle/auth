@@ -335,7 +335,7 @@ a, err := auth.New(ctx,
 )
 ```
 
-The example also implements `RefreshTokenPurger`, so each `Authorizer` purges it in the background. It deletes in batches of 1000 with `FOR UPDATE SKIP LOCKED`, so purges on different instances, and refreshes in progress, don't block each other.
+The example also implements `RefreshTokenPurger`, so each `Authorizer` purges it in the background. It deletes expired tokens before expired families, so the cascade from each family has little left to delete, and works in batches of 1000 with `FOR UPDATE SKIP LOCKED`, so purges on different instances, and refreshes in progress, don't block each other.
 
 
 ## In-memory implementations

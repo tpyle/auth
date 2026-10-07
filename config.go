@@ -58,6 +58,8 @@ type Config struct {
 	// either way, so instances sharing a store do not purge in lockstep.
 	// Zero disables background purging; call
 	// [Authorizer.PurgeExpiredRefreshTokens] or purge the store yourself.
+	// Otherwise it must be at least 1m, which also catches unitless values
+	// such as 3600 (read as nanoseconds) in configuration files.
 	RefreshPurgeInterval time.Duration `mapstructure:"refresh_purge_interval"`
 
 	// KeyRotationInterval is how often this process switches to a new
@@ -88,6 +90,9 @@ type Config struct {
 	// cookie authentication. If both are enabled, the header wins.
 	AuthCookie string `mapstructure:"auth_cookie"`
 }
+
+// minRefreshPurgeInterval is the shortest nonzero RefreshPurgeInterval.
+const minRefreshPurgeInterval = time.Minute
 
 // DefaultConfig returns the configuration used when no options are given.
 func DefaultConfig() Config {
@@ -131,8 +136,8 @@ func (c Config) Validate() error {
 	if c.RefreshReuseGrace < 0 {
 		errs = append(errs, errors.New("auth: RefreshReuseGrace must not be negative"))
 	}
-	if c.RefreshPurgeInterval < 0 {
-		errs = append(errs, errors.New("auth: RefreshPurgeInterval must not be negative"))
+	if c.RefreshPurgeInterval != 0 && c.RefreshPurgeInterval < minRefreshPurgeInterval {
+		errs = append(errs, fmt.Errorf("auth: RefreshPurgeInterval must be 0 or at least %v", minRefreshPurgeInterval))
 	}
 	if c.KeyRotationInterval < 0 {
 		errs = append(errs, errors.New("auth: KeyRotationInterval must not be negative"))

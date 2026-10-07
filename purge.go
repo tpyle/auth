@@ -61,10 +61,11 @@ func (s *settings) backgroundPurger() (RefreshTokenPurger, bool) {
 	return p, ok
 }
 
-// runPurge purges p about every RefreshPurgeInterval until ctx is cancelled.
+// runPurge purges p until ctx is cancelled, waiting nextWait(interval)
+// before each run.
 // Failures are logged and retried on the next run.
-func (a *Authorizer) runPurge(ctx context.Context, p RefreshTokenPurger, jitter func(time.Duration) time.Duration) {
-	timer := time.NewTimer(jitter(a.s.RefreshPurgeInterval))
+func (a *Authorizer) runPurge(ctx context.Context, p RefreshTokenPurger, nextWait func(time.Duration) time.Duration) {
+	timer := time.NewTimer(nextWait(a.s.RefreshPurgeInterval))
 	defer timer.Stop()
 	for {
 		select {
@@ -81,7 +82,7 @@ func (a *Authorizer) runPurge(ctx context.Context, p RefreshTokenPurger, jitter 
 		case n > 0:
 			a.s.logger.DebugContext(ctx, "auth: purged expired refresh tokens", "count", n)
 		}
-		timer.Reset(jitter(a.s.RefreshPurgeInterval))
+		timer.Reset(nextWait(a.s.RefreshPurgeInterval))
 	}
 }
 

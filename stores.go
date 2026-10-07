@@ -176,6 +176,8 @@ type RefreshTokenStore interface {
 // outlive their expiry briefly and a refresh accepted just before expiry
 // can still complete. Several instances may purge the same store at the
 // same time, so implementations must tolerate concurrent calls.
+// [Authorizer.Close] cancels ctx and waits for an in-progress purge to
+// return, so a purge that ignores ctx delays shutdown.
 type RefreshTokenPurger interface {
 	// PurgeExpiredRefreshTokens deletes every record whose ExpiresAt is
 	// before now, and forgets every family (revoked or not) whose tokens

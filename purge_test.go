@@ -444,3 +444,27 @@ func TestMemoryRefreshStoreRateLimitsPurge(t *testing.T) {
 	// A minute after the last purge: the short record goes.
 	create(refreshPurgeMargin+memoryPurgeInterval, time.Hour, 4)
 }
+
+// If the clock moves backwards, CreateRefreshToken keeps purging rather than
+// waiting for the clock to pass the previous purge again.
+func TestMemoryRefreshStorePurgesAfterClockRewind(t *testing.T) {
+	ctx := context.Background()
+	start := time.Now().Truncate(time.Second)
+	s := NewMemoryRefreshTokenStore()
+	create := func(after, ttl time.Duration, wantLen int) {
+		t.Helper()
+		at := start.Add(after)
+		rec := RefreshTokenRecord{ID: uuid.New(), FamilyID: uuid.New(), Subject: "bob", IssuedAt: at, ExpiresAt: at.Add(ttl)}
+		if err := s.CreateRefreshToken(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+		if s.Len() != wantLen {
+			t.Errorf("Len = %d after create at %+v; want %d", s.Len(), after, wantLen)
+		}
+	}
+	year := 365 * 24 * time.Hour
+	create(0, time.Hour, 1)
+	create(year, time.Hour, 1)           // clock jumps ahead a year; purges the first
+	create(0, time.Second, 2)            // clock set back
+	create(10*time.Minute, time.Hour, 2) // purges the short record
+}
