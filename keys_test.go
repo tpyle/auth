@@ -551,7 +551,7 @@ func TestRotationLoopSurvivesStoreOutage(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		keys := newFaultyKeyStore()
 		a := newLoopAuthorizer(t, keys)
-		defer a.Close()
+		defer func() { _ = a.Close() }()
 		next := a.keys.nextID()
 
 		keys.fail(&keys.storeErr, errTest)
@@ -577,7 +577,7 @@ func TestRotationLoopRetriesWhenNoKeyAvailable(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		keys := newFaultyKeyStore()
 		a := newLoopAuthorizer(t, keys)
-		defer a.Close()
+		defer func() { _ = a.Close() }()
 
 		keys.fail(&keys.storeErr, errTest)
 		time.Sleep(2 * time.Hour) // first rotation uses next; the second has nothing
@@ -597,7 +597,7 @@ func TestRotationLoopLogsCleanupFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		keys := newFaultyKeyStore()
 		a := newLoopAuthorizer(t, keys)
-		defer a.Close()
+		defer func() { _ = a.Close() }()
 		first := a.keys.current.Load().id
 		keys.fail(&keys.listErr, errTest)
 		time.Sleep(time.Hour)

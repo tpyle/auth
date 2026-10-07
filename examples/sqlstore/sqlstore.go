@@ -106,7 +106,7 @@ func (s *Store) ListKeys(ctx context.Context) ([]*auth.VerificationKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // iteration errors are reported by rows.Err
 	var keys []*auth.VerificationKey
 	for rows.Next() {
 		k, err := scanKey(rows)

@@ -25,7 +25,8 @@ func TestHashAndVerifyPassword(t *testing.T) {
 }
 
 func TestHashPasswordUsesUniqueSalts(t *testing.T) {
-	if mustHash(t, "same") == mustHash(t, "same") {
+	h1, h2 := mustHash(t, "same"), mustHash(t, "same")
+	if h1 == h2 {
 		t.Error("two hashes of the same password are identical")
 	}
 }
