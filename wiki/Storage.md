@@ -336,5 +336,5 @@ Limits:
 
 - **Nothing survives a restart.** With the default `MemoryKeyStore`, every token issued before a restart fails verification after it, because the new process cannot find the old keys. Every user has to log in again.
 - **The default `MemoryKeyStore` works for one instance only.** Each process gets its own private store, so a token issued by instance A fails with `ErrInvalidToken` on instance B. Behind a load balancer, use a shared `KeyStore` (and a shared `RefreshTokenStore`).
-- `MemoryRefreshTokenStore` uses the real wall clock to purge records and families. It ignores `WithClock`.
+- `MemoryRefreshTokenStore` purges records and families relative to the new record's `IssuedAt`, so it follows the `Authorizer`'s clock, including one set with `WithClock`.
 - They are meant for tests, examples, prototypes and single-instance services that can accept losing every session on restart.

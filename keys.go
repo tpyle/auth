@@ -211,19 +211,20 @@ func (km *keyManager) cleanup(ctx context.Context) error {
 	return nil
 }
 
-// run rotates keys every KeyRotationInterval until ctx is cancelled, keeps
-// the next key pre-generated, and removes expired keys. Failed steps are
-// retried after rotationRetryDelay. If a rotation cannot happen at all, the
-// old key keeps signing, so tokens issued in that window may become
-// unverifiable slightly before they expire.
-func (km *keyManager) run(ctx context.Context) {
-	interval := km.s.KeyRotationInterval
-	if interval <= 0 {
+// firstWait is how long run should wait before its first step. It must be
+// computed before run starts, so the schedule does not depend on when the
+// goroutine is scheduled.
+func (km *keyManager) firstWait() time.Duration {
+	return max(km.current.Load().signUntil.Sub(km.s.now()), 0)
+}
+
+// run performs rotation work until ctx is cancelled, first after wait and
+// then whenever the current key's signing window ends. See step.
+func (km *keyManager) run(ctx context.Context, wait time.Duration) {
+	if km.s.KeyRotationInterval <= 0 {
 		return
 	}
-	due := km.s.now().Add(interval)
-	retry := min(rotationRetryDelay, interval)
-	timer := time.NewTimer(interval)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	for {
 		select {
@@ -231,31 +232,54 @@ func (km *keyManager) run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		now := km.s.now()
-		if !now.Before(due) {
-			if err := km.rotate(ctx); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				km.s.logger.ErrorContext(ctx, "auth: rotating signing key", "error", err)
-				timer.Reset(retry)
-				continue
-			}
-			due = now.Add(interval)
-		}
-		wait := due.Sub(now)
-		if err := km.ensureNext(ctx, due); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			km.s.logger.ErrorContext(ctx, "auth: pre-generating next signing key", "error", err)
-			wait = min(wait, retry)
-		}
-		if err := km.cleanup(ctx); err != nil {
-			km.s.logger.WarnContext(ctx, "auth: removing expired signing keys", "error", err)
+		wait := km.step(ctx)
+		if ctx.Err() != nil {
+			return
 		}
 		timer.Reset(wait)
 	}
+}
+
+// step rotates if the current key's signing window has ended, keeps the next
+// key pre-generated, and removes expired keys. It returns how long to wait
+// before the next step: until the current window ends, or
+// rotationRetryDelay after a failure. If a rotation cannot happen at all, the
+// old key keeps signing until signer refuses to use it.
+//
+// The schedule is derived from the current key rather than kept separately,
+// so a rotation already performed by signer is never repeated here.
+func (km *keyManager) step(ctx context.Context) time.Duration {
+	retry := min(rotationRetryDelay, km.s.KeyRotationInterval)
+	if err := km.rotateIfDue(ctx); err != nil {
+		if ctx.Err() == nil {
+			km.s.logger.ErrorContext(ctx, "auth: rotating signing key", "error", err)
+		}
+		return retry
+	}
+	cur := km.current.Load()
+	wait := max(cur.signUntil.Sub(km.s.now()), 0)
+	if err := km.ensureNext(ctx, cur.signUntil); err != nil {
+		if ctx.Err() == nil {
+			km.s.logger.ErrorContext(ctx, "auth: pre-generating next signing key", "error", err)
+		}
+		wait = min(wait, retry)
+	}
+	if err := km.cleanup(ctx); err != nil && ctx.Err() == nil {
+		km.s.logger.WarnContext(ctx, "auth: removing expired signing keys", "error", err)
+	}
+	return wait
+}
+
+// rotateIfDue rotates if the current key's signing window has ended. The
+// check is repeated under the lock, so it does nothing if another goroutine
+// (such as signer) has already rotated.
+func (km *keyManager) rotateIfDue(ctx context.Context) error {
+	km.rotMu.Lock()
+	defer km.rotMu.Unlock()
+	if km.s.now().Before(km.current.Load().signUntil) {
+		return nil
+	}
+	return km.rotateLocked(ctx)
 }
 
 // refresh reloads the key set from the store unless another goroutine has

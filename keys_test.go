@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -458,6 +459,47 @@ func TestSignerRotatesOverdueKeys(t *testing.T) {
 			t.Errorf("key rotated without rotation enabled: %v", err)
 		}
 	})
+}
+
+// A rotation already performed by signer (after the loop fell behind) must
+// not be repeated by the loop, which would discard the pre-published key and
+// sign with one verifiers have never seen.
+func TestStepDoesNotRepeatSignerRotation(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock()
+	a := newTestAuthorizer(t, WithClock(clock.Now), WithKeyRotationInterval(time.Hour))
+	next := a.keys.nextID()
+	clock.Advance(time.Hour + keyRetentionMargin + time.Second)
+	if _, err := a.IssueAccessToken("bob", nil); err != nil { // signer rotates
+		t.Fatal(err)
+	}
+	if a.keys.current.Load().id != next {
+		t.Fatal("signer did not promote the pre-generated key")
+	}
+
+	wait := a.keys.step(ctx) // the loop wakes up late
+	if a.keys.current.Load().id != next {
+		t.Error("step rotated again, discarding the pre-published key")
+	}
+	if a.keys.nextID() == uuid.Nil {
+		t.Error("step did not pre-generate a new next key")
+	}
+	if want := a.keys.current.Load().signUntil.Sub(clock.Now()); wait != want {
+		t.Errorf("step waits %v; want %v (until the current window ends)", wait, want)
+	}
+}
+
+// Times from the settings clock carry no monotonic reading, so comparisons
+// use wall time, which (unlike the monotonic clock) advances during suspend.
+func TestClockHasNoMonotonicReading(t *testing.T) {
+	a := newTestAuthorizer(t)
+	if s := a.s.now().String(); strings.Contains(s, "m=") {
+		t.Errorf("now() = %s carries a monotonic reading", s)
+	}
+	cur := a.keys.current.Load()
+	if s := cur.signUntil.String(); strings.Contains(s, "m=") {
+		t.Errorf("signUntil = %s carries a monotonic reading", s)
+	}
 }
 
 func newLoopAuthorizer(t *testing.T, keys KeyStore) *Authorizer {

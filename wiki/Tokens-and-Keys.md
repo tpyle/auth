@@ -179,6 +179,8 @@ A key signs for at most one rotation interval after it is activated (its signing
 
 Each key has a planned signing window: from its activation to activation + `KeyRotationInterval`. Normally the background loop rotates on time. If it falls behind (for example because the process or VM was suspended), the current key could pass its window. Tokens it signed then would outlive the key's stored `ExpiresAt`, and other instances would stop accepting them before their `exp`.
 
+All of these checks use **wall-clock time**. Go normally compares `time.Now()` values by their monotonic clock reading, which on Linux does not advance while the machine is suspended, so a resumed process would think less time had passed than it did. The `Authorizer` strips that reading from every time it uses, so after a suspend it agrees with other instances, which compare the stored wall-clock timestamps. The background loop also schedules itself from the current key's window, so if a signing operation has already rotated, the loop does not rotate again.
+
 To prevent this, every signing operation first checks the current key. If the key is more than 5 minutes past the end of its window, the operation rotates **synchronously** before signing:
 
 - If the pre-generated next key is still within its own window, it is promoted.

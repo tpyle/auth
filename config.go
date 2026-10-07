@@ -292,9 +292,16 @@ func buildSettings(opts []Option) (*settings, error) {
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
-	if s.now == nil {
-		s.now = time.Now
+	clock := s.now
+	if clock == nil {
+		clock = time.Now
 	}
+	// Strip monotonic clock readings so every comparison uses wall time.
+	// Go compares times by their monotonic readings when both have one, and
+	// on Linux that clock does not advance while the machine is suspended;
+	// this instance would then disagree with others, which compare stored
+	// wall-clock timestamps.
+	s.now = func() time.Time { return clock().Round(0) }
 	return s, nil
 }
 

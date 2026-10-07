@@ -81,9 +81,10 @@ func New(ctx context.Context, opts ...Option) (*Authorizer, error) {
 		cancel:        cancel,
 		done:          make(chan struct{}),
 	}
+	firstWait := km.firstWait()
 	go func() {
 		defer close(a.done)
-		km.run(runCtx)
+		km.run(runCtx, firstWait)
 	}()
 	return a, nil
 }
