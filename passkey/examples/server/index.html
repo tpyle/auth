@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passkey example</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+  fieldset { margin-bottom: 1rem; }
+  pre { background: #f4f4f4; padding: .5rem; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Passkey example</h1>
+<p>Status: <strong id="status">signed out</strong></p>
+
+<fieldset>
+  <legend>1. Sign in with a password</legend>
+  <input id="user" value="alice"> <input id="pass" type="password" value="password">
+  <button id="password-login">Sign in</button>
+</fieldset>
+<fieldset>
+  <legend>2. Add a passkey (signed in)</legend>
+  <input id="label" value="My passkey"> <button id="register">Register passkey</button>
+  <button id="list">List passkeys</button>
+</fieldset>
+<fieldset>
+  <legend>3. Sign in with a passkey</legend>
+  <button id="sign-out">Sign out</button> <button id="passkey-login">Sign in with passkey</button>
+</fieldset>
+<pre id="log"></pre>
+
+<script>
+// This page keeps the access token in memory only; it is a demo, not a
+// pattern for production token handling.
+let token = "";
+const byId = (id) => document.getElementById(id);
+
+const log = (msg) => { document.getElementById("log").textContent = typeof msg === "string" ? msg : JSON.stringify(msg, null, 2); };
+const setToken = (t) => { token = t; document.getElementById("status").textContent = t ? "signed in" : "signed out"; };
+
+async function api(path, body, method = "POST") {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = "Bearer " + token;
+  const resp = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) throw new Error(path + ": " + resp.status + " " + JSON.stringify(data));
+  return data;
+}
+
+document.getElementById("password-login").onclick = async () => {
+  try {
+    const pair = await api("/login", { username: byId("user").value, password: byId("pass").value });
+    setToken(pair.access_token);
+    log(await api("/me", undefined, "GET"));
+  } catch (e) { log(String(e)); }
+};
+
+document.getElementById("register").onclick = async () => {
+  try {
+    const ch = await api("/passkey/register/begin");
+    const publicKey = PublicKeyCredential.parseCreationOptionsFromJSON(ch.options.publicKey);
+    const cred = await navigator.credentials.create({ publicKey });
+    log(await api("/passkey/register/finish", { ceremonyId: ch.ceremonyId, credential: cred.toJSON(), label: byId("label").value }));
+  } catch (e) { log(String(e)); }
+};
+
+document.getElementById("list").onclick = async () => {
+  try { log(await api("/passkeys", undefined, "GET")); } catch (e) { log(String(e)); }
+};
+
+document.getElementById("sign-out").onclick = () => { setToken(""); log("signed out"); };
+
+document.getElementById("passkey-login").onclick = async () => {
+  try {
+    const ch = await api("/passkey/login/begin");
+    const publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(ch.options.publicKey);
+    const cred = await navigator.credentials.get({ publicKey });
+    const pair = await api("/passkey/login/finish", { ceremonyId: ch.ceremonyId, credential: cred.toJSON() });
+    setToken(pair.access_token);
+    log(await api("/me", undefined, "GET"));
+  } catch (e) { log(String(e)); }
+};
+
+if (!window.PublicKeyCredential || !PublicKeyCredential.parseCreationOptionsFromJSON) {
+  log("This browser does not support the WebAuthn JSON helpers (Chrome 129+, Safari 18+, Firefox 119+).");
+}
+</script>
+</body>
+</html>

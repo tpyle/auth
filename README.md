@@ -74,6 +74,28 @@ next, err := a.Refresh(ctx, pair.RefreshToken)
 err = a.Logout(ctx, next.RefreshToken)
 ```
 
+## Passkeys
+
+Passwordless login with passkeys and FIDO2 security keys (WebAuthn) lives in a
+separate module, so it adds no dependencies here:
+
+```bash
+go get github.com/tpyle/auth/passkey
+```
+
+```go
+pk, err := passkey.New(
+	passkey.WithRelyingParty("example.com", "Example", "https://example.com"),
+	passkey.WithUserStore(passkeyUsers),
+	passkey.WithCredentialStore(credentials),
+	passkey.WithTokenIssuer(a), // the *auth.Authorizer above
+)
+ch, err := pk.BeginLogin(ctx)                           // send ch to the browser
+pair, err := pk.FinishLogin(ctx, ch.CeremonyID, response) // same TokenPair as Login
+```
+
+See [wiki/Passkeys.md](wiki/Passkeys.md) and [`passkey/examples/server`](passkey/examples/server).
+
 ## Examples
 
 - [`examples/basic`](examples/basic): the whole lifecycle in one program (`go run ./examples/basic`).
@@ -89,6 +111,7 @@ err = a.Logout(ctx, next.RefreshToken)
 - [HTTP Middleware](wiki/HTTP-Middleware.md)
 - [Error Handling](wiki/Error-Handling.md)
 - [Security](wiki/Security.md)
+- [Passkeys](wiki/Passkeys.md): FIDO2/WebAuthn login
 
 API reference: [pkg.go.dev/github.com/tpyle/auth/v2](https://pkg.go.dev/github.com/tpyle/auth/v2)
 

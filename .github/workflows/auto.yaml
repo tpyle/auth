@@ -11,7 +11,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    name: Test and Lint
+    name: Test and Lint (${{ matrix.module }})
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", "passkey"]
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -19,7 +26,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
 
       - name: Check go.mod is tidy
         run: go mod tidy -diff

@@ -19,6 +19,7 @@ import "github.com/tpyle/auth/v2"
 - **net/http middleware** for optional and required authentication, using a `Bearer` header or a cookie.
 - **JWKS endpoint** so other services can verify tokens with any standard JWT library.
 - **In-memory stores** for tests, examples and single-instance deployments.
+- **Passkeys (FIDO2/WebAuthn)** through the separate [`github.com/tpyle/auth/passkey`](Passkeys.md) module, which issues the same tokens as a password login.
 - Dependencies: `golang-jwt/jwt/v5`, `google/uuid`, `golang.org/x/crypto`. No dependency on any configuration library.
 
 ## Pages
@@ -32,4 +33,5 @@ import "github.com/tpyle/auth/v2"
 | [HTTP Middleware](HTTP-Middleware.md) | `AuthHandler`, `RequireAuthHandler`, token extraction, a full server example |
 | [Error Handling](Error-Handling.md) | Every sentinel error and how to map it to HTTP statuses |
 | [Security](Security.md) | Hashing parameters, cryptographic choices, deployment advice |
+| [Passkeys](Passkeys.md) | Passwordless login with passkeys and FIDO2 security keys (the `passkey` module) |
 | [Migrating from v1](Migrating-from-v1.md) | API mapping and behavior changes from v1 |
