@@ -8,7 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
+	"uuid"
+
 	"github.com/tpyle/auth/v2"
 )
 
@@ -87,7 +88,7 @@ func TestServerRoutes(t *testing.T) {
 	if code, _ := do("POST", "/passkey/login/finish", body, ""); code != http.StatusUnauthorized {
 		t.Errorf("login finish with bad credential = %d", code)
 	}
-	body = `{"ceremonyId":"` + uuid.NewString() + `","credential":{}}`
+	body = `{"ceremonyId":"` + uuid.New().String() + `","credential":{}}`
 	if code, _ := do("POST", "/passkey/login/finish", body, ""); code != http.StatusBadRequest {
 		t.Errorf("login finish with unknown ceremony = %d", code)
 	}

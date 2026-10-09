@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"slices"
 
+	"uuid"
+
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/google/uuid"
 	"github.com/tpyle/auth/v2"
 )
 

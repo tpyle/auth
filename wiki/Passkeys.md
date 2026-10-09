@@ -6,7 +6,7 @@
 go get github.com/tpyle/auth/passkey
 ```
 
-It's a **separate Go module**, so services that don't use passkeys don't pick up its dependencies. Verification is done by [`go-webauthn/webauthn`](https://github.com/go-webauthn/webauthn) (BSD-3-Clause).
+It's a **separate Go module**, so services that don't use passkeys don't pick up its dependencies. It requires Go 1.27 or later and uses the standard library's `uuid.UUID` for ceremony IDs. The core module uses `github.com/google/uuid`, which has the same `[16]byte` layout, so you can convert between them with `uuid.UUID(id)`. Verification is done by [`go-webauthn/webauthn`](https://github.com/go-webauthn/webauthn) (BSD-3-Clause).
 
 > FIDO2 is made of two protocols. CTAP runs between the browser or OS and the authenticator (phone, laptop, USB key) and never reaches your server. WebAuthn runs between the page and your server, and that's what this package implements.
 

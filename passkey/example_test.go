@@ -8,7 +8,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/google/uuid"
+	"uuid"
+
 	"github.com/tpyle/auth/passkey"
 	"github.com/tpyle/auth/v2"
 )
@@ -78,7 +79,7 @@ func Example() {
 func readFinish(r *http.Request) (uuid.UUID, []byte, error) {
 	id, err := uuid.Parse(r.URL.Query().Get("ceremony"))
 	if err != nil {
-		return uuid.Nil, nil, passkey.ErrInvalidCeremony
+		return uuid.Nil(), nil, passkey.ErrInvalidCeremony
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, 64<<10))
 	return id, body, err

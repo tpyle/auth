@@ -13,7 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
+
 	"github.com/tpyle/auth/v2"
 )
 
@@ -898,5 +899,11 @@ func TestStoreKey(t *testing.T) {
 	a, b := storeKey(id, kindRegistration, "alice"), storeKey(id, kindRegistration, "bob")
 	if a == id || a == b || a != storeKey(id, kindRegistration, "alice") {
 		t.Errorf("registration keys: alice %v, bob %v, id %v", a, b, id)
+	}
+	if a[6]>>4 != 8 || a[8]>>6 != 0b10 {
+		t.Errorf("registration key %v is not an RFC 9562 version 8 UUID", a)
+	}
+	if _, err := uuid.Parse(a.String()); err != nil {
+		t.Errorf("registration key does not round-trip: %v", err)
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // UserHandleLength is the length of handles made by [NewUserHandle].

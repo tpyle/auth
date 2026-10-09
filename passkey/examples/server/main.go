@@ -19,7 +19,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
+
 	"github.com/tpyle/auth/passkey"
 	"github.com/tpyle/auth/v2"
 )

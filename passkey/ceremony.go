@@ -2,13 +2,15 @@ package passkey
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"uuid"
+
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/google/uuid"
 )
 
 // Challenge is the result of a Begin method, to be sent to the browser.
@@ -63,11 +65,22 @@ func (p *Passkeys) newChallenge(ctx context.Context, kind ceremonyKind, subject 
 // are keyed by their subject too, so a Finish by another user looks up a
 // different key and cannot consume (and so cancel) the real ceremony. Login
 // ceremonies are finished before the user is known, so they use the ID alone.
+//
+// The registration key is the first 16 bytes of SHA-256(id || subject),
+// marked as an RFC 9562 version 8 (custom) UUID so stores that validate
+// UUIDs accept it.
 func storeKey(id uuid.UUID, kind ceremonyKind, subject string) uuid.UUID {
-	if kind == kindRegistration {
-		return uuid.NewSHA1(id, []byte(subject))
+	if kind != kindRegistration {
+		return id
 	}
-	return id
+	h := sha256.New()
+	h.Write(id[:])
+	h.Write([]byte(subject))
+	var key uuid.UUID
+	copy(key[:], h.Sum(nil))
+	key[6] = key[6]&0x0f | 0x80 // version 8
+	key[8] = key[8]&0x3f | 0x80 // RFC 9562 variant
+	return key
 }
 
 // consumeCeremony takes the ceremony out of the store and checks that it is

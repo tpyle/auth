@@ -9,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
+
 	"github.com/tpyle/auth/v2"
 )
 
