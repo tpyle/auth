@@ -117,7 +117,9 @@ func (s *MemoryCredentialStore) RecordCredentialUse(_ context.Context, u Credent
 	c.BackupState = u.BackupState
 	c.UserVerified = c.UserVerified || u.UserVerified
 	c.CloneWarning = c.CloneWarning || u.CloneWarning
-	c.LastUsedAt = u.UsedAt
+	if !u.UsedAt.IsZero() {
+		c.LastUsedAt = u.UsedAt
+	}
 	s.creds[string(u.ID)] = c
 	return nil
 }
@@ -142,8 +144,12 @@ func cloneCredential(c Credential) Credential {
 }
 
 // MemoryCeremonyStore is an in-memory [CeremonyStore]. It is the default
-// when [New] is not given one. Because it is not shared, a ceremony can only
-// be finished by the process that began it.
+// when [New] is not given one, and is meant for development and
+// single-instance deployments. Because it is not shared, a ceremony can only
+// be finished by the process that began it. It has no size limit: every
+// Begin call adds an entry that lives for [Config.CeremonyTTL], so
+// rate-limit the Begin endpoints (as with any CeremonyStore, since
+// [Passkeys.BeginLogin] needs no authentication).
 type MemoryCeremonyStore struct {
 	mu         sync.Mutex
 	ceremonies map[uuid.UUID]memoryCeremony

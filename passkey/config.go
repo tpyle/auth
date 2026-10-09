@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/tpyle/auth/v2"
@@ -131,7 +132,7 @@ func checkOrigin(origin, rpID string) error {
 }
 
 func hasDomainSuffix(host, domain string) bool {
-	return len(host) > len(domain) && host[len(host)-len(domain)-1] == '.' && host[len(host)-len(domain):] == domain
+	return strings.HasSuffix(host, "."+domain)
 }
 
 // TokenIssuer issues tokens after a successful passkey login.
@@ -203,9 +204,12 @@ func WithCredentialStore(store CredentialStore) Option {
 }
 
 // WithCeremonyStore sets where ceremonies are kept between their Begin and
-// Finish steps. Without it, a private in-memory store is used, so a ceremony
-// must finish on the instance that began it; use a shared store when running
-// several instances behind a load balancer.
+// Finish steps. Without it, a private, unbounded [MemoryCeremonyStore] is
+// used, so a ceremony must finish on the instance that began it; use a
+// shared store with expiry (a database table or Redis) in production.
+//
+// Every Begin call stores a ceremony, and [Passkeys.BeginLogin] needs no
+// authentication, so rate-limit the Begin endpoints whichever store is used.
 func WithCeremonyStore(store CeremonyStore) Option {
 	return func(s *settings) { s.ceremonies = store }
 }

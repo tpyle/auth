@@ -78,14 +78,12 @@ func (p *Passkeys) BeginRegistration(ctx context.Context, subject string) (*Chal
 // It returns [ErrInvalidCeremony] if the ceremony cannot be used,
 // [ErrInvalidResponse] if the response fails verification, and an error
 // wrapping [ErrCredentialExists] if the credential is already registered.
-// Each ceremony can be finished once, successfully or not.
+// Each ceremony can be finished once, successfully or not. A ceremony begun
+// for another subject is not found, and stays usable by its own subject.
 func (p *Passkeys) FinishRegistration(ctx context.Context, subject string, ceremonyID uuid.UUID, response []byte, label string) (*Credential, error) {
-	rec, err := p.consumeCeremony(ctx, ceremonyID, kindRegistration)
+	rec, err := p.consumeCeremony(ctx, ceremonyID, kindRegistration, subject)
 	if err != nil {
 		return nil, err
-	}
-	if rec.Subject != subject {
-		return nil, ErrInvalidCeremony
 	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(response)
 	if err != nil {
@@ -111,7 +109,7 @@ func (p *Passkeys) FinishRegistration(ctx context.Context, subject string, cerem
 // BeginLogin starts a login in which the authenticator says who the user is,
 // so no username is needed. The browser offers the user's discoverable
 // credentials (passkeys) for this relying party. Finish it with
-// [Passkeys.FinishLogin] or [Passkeys.Authenticate].
+// [Passkeys.FinishLogin], [Passkeys.Authenticate] or [Passkeys.AuthenticateFor].
 func (p *Passkeys) BeginLogin(ctx context.Context) (*Challenge, error) {
 	assertion, session, err := p.wa.BeginDiscoverableLogin()
 	if err != nil {
@@ -122,8 +120,8 @@ func (p *Passkeys) BeginLogin(ctx context.Context) (*Challenge, error) {
 
 // BeginLoginFor starts a login restricted to subject's credentials. Unlike
 // [Passkeys.BeginLogin] this also works with security keys that registered a
-// non-discoverable credential, and it can be used for re-authentication of
-// a signed-in user.
+// non-discoverable credential, and with [Passkeys.AuthenticateFor] it
+// re-authenticates a signed-in user.
 //
 // The returned options list the user's credential IDs, and the error tells
 // whether the user exists and has credentials ([auth.ErrUserNotFound],
@@ -173,6 +171,10 @@ func (p *Passkeys) FinishLogin(ctx context.Context, ceremonyID uuid.UUID, respon
 // the credential's use, and returns the updated credential; its Subject is
 // the authenticated user. response is the JSON-serialized PublicKeyCredential.
 //
+// After a [Passkeys.BeginLogin] ceremony, any registered user's passkey is
+// accepted. To confirm that a signed-in user is present, for example before
+// a sensitive action, use [Passkeys.AuthenticateFor] instead.
+//
 // It returns [ErrInvalidCeremony] if the ceremony cannot be used and
 // [auth.ErrInvalidCredentials] if the response is not a valid assertion from
 // a registered credential of the expected user. The reason is logged at
@@ -181,9 +183,35 @@ func (p *Passkeys) FinishLogin(ctx context.Context, ceremonyID uuid.UUID, respon
 // [Config.AllowCloneWarning] is set. Each ceremony can be finished once,
 // successfully or not.
 func (p *Passkeys) Authenticate(ctx context.Context, ceremonyID uuid.UUID, response []byte) (*Credential, error) {
-	rec, err := p.consumeCeremony(ctx, ceremonyID, kindLogin)
+	return p.authenticate(ctx, "", ceremonyID, response)
+}
+
+// AuthenticateFor is like [Passkeys.Authenticate] but only accepts a
+// credential belonging to subject, so it can confirm that a signed-in user
+// is present (re-authentication) without the session's user being swapped
+// for whoever's passkey answered. The ceremony may come from
+// [Passkeys.BeginLoginFor] for the same subject (recommended: the browser
+// then offers only that user's credentials) or from [Passkeys.BeginLogin].
+//
+// A credential belonging to someone else fails with
+// [auth.ErrInvalidCredentials] and its use is not recorded. A ceremony begun
+// with BeginLoginFor for another subject fails with [ErrInvalidCeremony].
+func (p *Passkeys) AuthenticateFor(ctx context.Context, subject string, ceremonyID uuid.UUID, response []byte) (*Credential, error) {
+	if subject == "" {
+		return nil, errors.New("passkey: subject must not be empty")
+	}
+	return p.authenticate(ctx, subject, ceremonyID, response)
+}
+
+// authenticate implements Authenticate and AuthenticateFor. An empty subject
+// accepts any user.
+func (p *Passkeys) authenticate(ctx context.Context, subject string, ceremonyID uuid.UUID, response []byte) (*Credential, error) {
+	rec, err := p.consumeCeremony(ctx, ceremonyID, kindLogin, "")
 	if err != nil {
 		return nil, err
+	}
+	if subject != "" && rec.Subject != "" && rec.Subject != subject {
+		return nil, ErrInvalidCeremony
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(response)
 	if err != nil {
@@ -222,11 +250,14 @@ func (p *Passkeys) Authenticate(ctx context.Context, ceremonyID uuid.UUID, respo
 	if err != nil {
 		return nil, p.loginFailed(ctx, err)
 	}
+	if subject != "" && user.user.Subject != subject {
+		return nil, p.loginFailed(ctx, fmt.Errorf("credential belongs to %q, not %q", user.user.Subject, subject))
+	}
 	return p.recordUse(ctx, user, wc)
 }
 
-// recordUse saves the counter and flags from a verified assertion and
-// applies the clone policy.
+// recordUse applies the clone policy to a verified assertion and saves the
+// counter and flags, or only the clone warning if the login is refused.
 func (p *Passkeys) recordUse(ctx context.Context, user *waUser, wc *webauthn.Credential) (*Credential, error) {
 	i := slices.IndexFunc(user.stored, func(c Credential) bool { return bytes.Equal(c.ID, wc.ID) })
 	if i < 0 {
@@ -234,6 +265,23 @@ func (p *Passkeys) recordUse(ctx context.Context, user *waUser, wc *webauthn.Cre
 		return nil, errors.New("passkey: verified credential is not in the user's credential list")
 	}
 	cred := user.stored[i]
+	clone := cred.CloneWarning || wc.Authenticator.CloneWarning
+	if clone {
+		p.s.logger.WarnContext(ctx, "passkey: signature counter regressed; credential may be cloned",
+			"subject", cred.Subject, "refused", !p.s.AllowCloneWarning)
+	}
+	if clone && !p.s.AllowCloneWarning {
+		// Refused: save only the warning, so the attempt does not look
+		// like a use of the credential.
+		if !cred.CloneWarning {
+			use := CredentialUse{ID: cred.ID, SignCount: cred.SignCount, BackupState: cred.BackupState,
+				UserVerified: cred.UserVerified, CloneWarning: true}
+			if err := p.s.credentials.RecordCredentialUse(ctx, use); err != nil {
+				return nil, fmt.Errorf("passkey: recording clone warning: %w", err)
+			}
+		}
+		return nil, fmt.Errorf("%w: %w", auth.ErrInvalidCredentials, ErrPossibleClone)
+	}
 	use := CredentialUse{
 		ID:           cred.ID,
 		SignCount:    wc.Authenticator.SignCount,
@@ -242,23 +290,14 @@ func (p *Passkeys) recordUse(ctx context.Context, user *waUser, wc *webauthn.Cre
 		CloneWarning: wc.Authenticator.CloneWarning,
 		UsedAt:       p.s.now(),
 	}
-	// Recorded even if the login is about to be refused, so the clone
-	// warning is saved.
 	if err := p.s.credentials.RecordCredentialUse(ctx, use); err != nil {
 		return nil, fmt.Errorf("passkey: recording credential use: %w", err)
 	}
 	cred.SignCount = max(cred.SignCount, use.SignCount)
 	cred.BackupState = use.BackupState
 	cred.UserVerified = cred.UserVerified || use.UserVerified
-	cred.CloneWarning = cred.CloneWarning || use.CloneWarning
+	cred.CloneWarning = clone
 	cred.LastUsedAt = use.UsedAt
-	if cred.CloneWarning {
-		p.s.logger.WarnContext(ctx, "passkey: signature counter regressed; credential may be cloned",
-			"subject", cred.Subject, "refused", !p.s.AllowCloneWarning)
-		if !p.s.AllowCloneWarning {
-			return nil, fmt.Errorf("%w: %w", auth.ErrInvalidCredentials, ErrPossibleClone)
-		}
-	}
 	return &cred, nil
 }
 

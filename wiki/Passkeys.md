@@ -78,7 +78,17 @@ ch, err := pk.BeginLogin(r.Context())
 pair, err := pk.FinishLogin(r.Context(), req.CeremonyID, req.Credential) // *auth.TokenPair
 ```
 
-To verify a passkey without issuing tokens, for example to confirm a sensitive action, use `pk.Authenticate`. It returns the verified `*Credential`, and `Credential.Subject` is the user. `BeginLoginFor(ctx, subject)` restricts a login to one user's credentials. It's useful for re-authentication and for non-discoverable security keys, but it reveals whether that user has passkeys, so prefer `BeginLogin` on public endpoints.
+To verify a passkey without issuing tokens, use `pk.Authenticate`. It returns the verified `*Credential`, and `Credential.Subject` is the user. After `BeginLogin`, **any** registered user's passkey passes, so don't use `Authenticate` on its own to confirm that the signed-in user is present.
+
+To **re-authenticate a signed-in user**, for example before a sensitive action, use `AuthenticateFor`. It only accepts that user's credentials:
+
+```go
+subject, _ := auth.SubjectFromContext(r.Context())
+ch, err := pk.BeginLoginFor(r.Context(), subject)                           // the browser offers only this user's passkeys
+cred, err := pk.AuthenticateFor(r.Context(), subject, req.CeremonyID, req.Credential) // someone else's passkey -> ErrInvalidCredentials
+```
+
+`BeginLoginFor(ctx, subject)` restricts a login to one user's credentials. Besides re-authentication, it works with non-discoverable security keys. It reveals whether that user has passkeys, though, so prefer `BeginLogin` on public endpoints.
 
 ### Browser side
 
@@ -105,15 +115,17 @@ Registration works the same way with `parseCreationOptionsFromJSON` and `navigat
 |---|---|---|
 | `UserStore` | Look up a user's handle and names by subject, or a user by handle | `WithUserStore` (required) |
 | `CredentialStore` | Registered public keys | `WithCredentialStore` (required) |
-| `CeremonyStore` | Challenges between Begin and Finish | `WithCeremonyStore` (default: in-memory, single instance only) |
+| `CeremonyStore` | Challenges between Begin and Finish | `WithCeremonyStore` (default: in-memory and unbounded, for development and single instances) |
 
 All three are called concurrently and must be safe for concurrent use.
+
+Every Begin call stores a ceremony until it expires, and `BeginLogin` needs no authentication. **Rate-limit the Begin endpoints** whichever `CeremonyStore` you use, so anonymous clients can't fill it.
 
 ### Contracts
 
 - `UserStore.LookupUser` and `LookupUserByHandle` return an error wrapping `auth.ErrUserNotFound` for unknown users. Handles must be compared byte for byte.
 - `CredentialStore.CreateCredential` fails with `ErrCredentialExists` if **any** user already has that credential ID. Use a unique index.
-- `CredentialStore.RecordCredentialUse` must never lower `SignCount` (use `GREATEST`). `CloneWarning`, once true, must stay true. A missing credential isn't an error.
+- `CredentialStore.RecordCredentialUse` must never lower `SignCount` (use `GREATEST`). `CloneWarning`, once true, must stay true. A zero `UsedAt` means a refused login is only recording a clone warning: leave `LastUsedAt` unchanged. A missing credential isn't an error.
 - `CredentialStore.DeleteCredential` deletes only if the credential belongs to the given subject. Otherwise it returns `ErrCredentialNotFound`.
 - `CeremonyStore.ConsumeCeremony` **atomically deletes and returns** the ceremony, so it can be finished only once. It returns `ErrCeremonyNotFound` if the ceremony is missing or expired.
 
@@ -158,7 +170,7 @@ UPDATE webauthn_credentials
        backup_state  = $3,
        user_verified = user_verified OR $4,
        clone_warning = clone_warning OR $5,
-       last_used_at  = $6
+       last_used_at  = COALESCE($6, last_used_at) -- pass NULL when UsedAt is zero
  WHERE id = $1;
 
 -- ConsumeCeremony: atomic, single use
@@ -171,7 +183,7 @@ Delete expired ceremonies now and then (`DELETE FROM webauthn_ceremonies WHERE e
 
 | Error | Returned by | Suggested HTTP status |
 |---|---|---|
-| `auth.ErrInvalidCredentials` | `FinishLogin`, `Authenticate`: the assertion is invalid, or the credential is unknown or belongs to someone else | 401 |
+| `auth.ErrInvalidCredentials` | `FinishLogin`, `Authenticate`, `AuthenticateFor`: the assertion is invalid, or the credential is unknown or belongs to someone else | 401 |
 | `passkey.ErrPossibleClone` (also wraps `ErrInvalidCredentials`) | Login with a credential whose counter went backwards | 401. Consider alerting the user. |
 | `passkey.ErrInvalidCeremony` | Finish methods: the ceremony is unknown, expired, already used, the wrong kind, or belongs to another user | 400. Start over. |
 | `passkey.ErrInvalidResponse` | `FinishRegistration`: the response is malformed or failed verification | 400 |
@@ -185,9 +197,9 @@ To keep login failures from revealing anything, they all collapse to `ErrInvalid
 
 ## Security
 
-- **Challenges are stored server-side and single-use.** Each Finish call consumes its ceremony, even if it fails, so a captured response can't be replayed. Ceremonies are bound to their kind (registration or login) and, for registration, to the user who began them.
+- **Challenges are stored server-side and single-use.** Each Finish call consumes its ceremony, even if it fails, so a captured response can't be replayed. Ceremonies are bound to their kind (registration or login). Registration ceremonies are also stored under a key derived from the user who began them, so another user's Finish can't find them, and so can't cancel them.
 - **Origin and RP ID** are checked on every response, so a phishing site on another domain can't use your users' passkeys.
 - **Attestation isn't requested** (`attestation: "none"`). The server trusts the public key it was given at registration, not a particular authenticator make. Registration is only allowed for signed-in users.
-- **Signature counters:** when an authenticator reports a counter that isn't higher than the stored one (and isn't 0), the credential gets a permanent `CloneWarning` and is refused unless `AllowCloneWarning` is set. Synced passkeys always report 0 and never trigger this.
+- **Signature counters:** when an authenticator reports a counter that isn't higher than the stored one (and isn't 0), the credential gets a permanent `CloneWarning` and is refused unless `AllowCloneWarning` is set. A refused attempt records only the warning; it doesn't update `LastUsedAt` or the counter. Synced passkeys always report 0 and never trigger this.
 - **User verification** defaults to `required`, so a stolen, locked device isn't enough to log in.
 - Deleting a credential stops it from logging in, but the copy on the authenticator stays until the user removes it.

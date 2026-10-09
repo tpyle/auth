@@ -271,6 +271,10 @@ func TestRegistrationSubjectMismatch(t *testing.T) {
 	if creds, _ := e.creds.ListCredentials(ctx, "bob"); len(creds) != 0 {
 		t.Errorf("bob has credentials %+v", creds)
 	}
+	// Bob's attempt did not use up alice's ceremony.
+	if _, err := e.p.FinishRegistration(ctx, "alice", ch.CeremonyID, resp, ""); err != nil {
+		t.Errorf("alice's finish after bob's attempt: %v", err)
+	}
 }
 
 func TestRegistrationRejected(t *testing.T) {
@@ -473,6 +477,8 @@ func TestSignCountAndCloneWarning(t *testing.T) {
 			}
 		}
 
+		lastUse := e.storedCredential("alice").LastUsedAt
+		e.clock.Advance(time.Minute)
 		e.va.counter = 0 // the clone reports 1, which is not greater than 2
 		got, err := e.login(cred)
 		if allow {
@@ -485,6 +491,10 @@ func TestSignCountAndCloneWarning(t *testing.T) {
 		stored := e.storedCredential("alice")
 		if !stored.CloneWarning || stored.SignCount != 2 {
 			t.Errorf("allow=%v: stored = %+v", allow, stored)
+		}
+
+		if !allow && !stored.LastUsedAt.Equal(lastUse) {
+			t.Errorf("refused login changed LastUsedAt from %v to %v", lastUse, stored.LastUsedAt)
 		}
 
 		// The warning is sticky even once the counter moves on.
@@ -731,6 +741,19 @@ func TestStoreErrors(t *testing.T) {
 			t.Errorf("err = %v", err)
 		}
 	})
+	t.Run("record clone warning", func(t *testing.T) {
+		e, _, creds := newFailing(t)
+		e.va.useCounter = true
+		cred := e.register("alice")
+		if _, err := e.login(cred); err != nil {
+			t.Fatal(err)
+		}
+		e.va.counter = 0
+		creds.set(func() { creds.recordErr = errStore })
+		if _, err := e.login(cred); !errors.Is(err, errStore) {
+			t.Errorf("err = %v", err)
+		}
+	})
 	t.Run("delete", func(t *testing.T) {
 		e, _, creds := newFailing(t)
 		creds.set(func() { creds.deleteErr = errStore })
@@ -817,5 +840,63 @@ func TestChallengeJSON(t *testing.T) {
 		if _, ok := decoded[k]; !ok {
 			t.Errorf("Challenge JSON lacks %q: %s", k, mustMarshal(t, ch))
 		}
+	}
+}
+
+func TestAuthenticateFor(t *testing.T) {
+	e := newEnv(t)
+	aliceCred := e.register("alice")
+	bobCred := e.register("bob")
+
+	// Discoverable ceremony, own credential.
+	ch := e.beginLogin()
+	got, err := e.p.AuthenticateFor(ctx, "alice", ch.CeremonyID, e.va.get(ch, aliceCred, true))
+	if err != nil || got.Subject != "alice" {
+		t.Fatalf("own passkey: credential = %+v, err = %v", got, err)
+	}
+
+	// BeginLoginFor ceremony for the same subject.
+	ch, err = e.p.BeginLoginFor(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.p.AuthenticateFor(ctx, "alice", ch.CeremonyID, e.va.get(ch, aliceCred, false)); err != nil {
+		t.Errorf("BeginLoginFor ceremony: %v", err)
+	}
+
+	// Someone else's passkey on a discoverable ceremony is refused, and its
+	// use is not recorded.
+	e.clock.Advance(time.Minute)
+	bobBefore := e.storedCredential("bob")
+	ch = e.beginLogin()
+	if _, err := e.p.AuthenticateFor(ctx, "alice", ch.CeremonyID, e.va.get(ch, bobCred, true)); !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Errorf("other user's passkey: err = %v, want ErrInvalidCredentials", err)
+	}
+	if bobAfter := e.storedCredential("bob"); !bobAfter.LastUsedAt.Equal(bobBefore.LastUsedAt) {
+		t.Errorf("refused use recorded: LastUsedAt %v -> %v", bobBefore.LastUsedAt, bobAfter.LastUsedAt)
+	}
+
+	// A ceremony begun for another subject.
+	ch, err = e.p.BeginLoginFor(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.p.AuthenticateFor(ctx, "alice", ch.CeremonyID, e.va.get(ch, bobCred, true)); !errors.Is(err, ErrInvalidCeremony) {
+		t.Errorf("bob's ceremony: err = %v, want ErrInvalidCeremony", err)
+	}
+
+	if _, err := e.p.AuthenticateFor(ctx, "", e.beginLogin().CeremonyID, nil); err == nil {
+		t.Error("empty subject accepted")
+	}
+}
+
+func TestStoreKey(t *testing.T) {
+	id := uuid.New()
+	if storeKey(id, kindLogin, "alice") != id {
+		t.Error("login key is not the ceremony ID")
+	}
+	a, b := storeKey(id, kindRegistration, "alice"), storeKey(id, kindRegistration, "bob")
+	if a == id || a == b || a != storeKey(id, kindRegistration, "alice") {
+		t.Errorf("registration keys: alice %v, bob %v, id %v", a, b, id)
 	}
 }

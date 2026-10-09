@@ -87,6 +87,13 @@ func TestMemoryCredentialStore(t *testing.T) {
 	if got.SignCount != 7 || got.BackupState || !got.UserVerified || !got.CloneWarning || !got.LastUsedAt.Equal(used) {
 		t.Errorf("after use: %+v", got)
 	}
+	// A zero UsedAt (a refused login recording a clone warning) keeps LastUsedAt.
+	if err := s.RecordCredentialUse(ctx, CredentialUse{ID: []byte{1}, SignCount: 7, CloneWarning: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := findCredential(t, s, "alice", 1); !got.LastUsedAt.Equal(used) {
+		t.Errorf("zero UsedAt changed LastUsedAt to %v", got.LastUsedAt)
+	}
 	if err := s.RecordCredentialUse(ctx, CredentialUse{ID: []byte{42}}); err != nil {
 		t.Errorf("RecordCredentialUse(missing) = %v", err)
 	}

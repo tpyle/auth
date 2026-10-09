@@ -106,7 +106,8 @@ type CredentialUse struct {
 	UserVerified bool
 	// CloneWarning is true if the counter went backwards on this login.
 	CloneWarning bool
-	// UsedAt is when the login happened.
+	// UsedAt is when the login happened. It is zero when a refused login
+	// only records CloneWarning, and LastUsedAt must then be left unchanged.
 	UsedAt time.Time
 }
 

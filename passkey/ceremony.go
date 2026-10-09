@@ -53,18 +53,30 @@ func (p *Passkeys) newChallenge(ctx context.Context, kind ceremonyKind, subject 
 		return nil, fmt.Errorf("passkey: encoding ceremony: %w", err)
 	}
 	id := uuid.New()
-	if err := p.s.ceremonies.SaveCeremony(ctx, id, data, expires); err != nil {
+	if err := p.s.ceremonies.SaveCeremony(ctx, storeKey(id, kind, subject), data, expires); err != nil {
 		return nil, fmt.Errorf("passkey: saving ceremony: %w", err)
 	}
 	return &Challenge{CeremonyID: id, Options: opts, ExpiresAt: expires}, nil
 }
 
+// storeKey is the CeremonyStore key for a ceremony. Registration ceremonies
+// are keyed by their subject too, so a Finish by another user looks up a
+// different key and cannot consume (and so cancel) the real ceremony. Login
+// ceremonies are finished before the user is known, so they use the ID alone.
+func storeKey(id uuid.UUID, kind ceremonyKind, subject string) uuid.UUID {
+	if kind == kindRegistration {
+		return uuid.NewSHA1(id, []byte(subject))
+	}
+	return id
+}
+
 // consumeCeremony takes the ceremony out of the store and checks that it is
-// the kind the caller expects and has not expired. The ceremony is consumed
-// even when the checks fail, so every Finish attempt needs a new Begin.
-func (p *Passkeys) consumeCeremony(ctx context.Context, id uuid.UUID, kind ceremonyKind) (*ceremonyRecord, error) {
+// the kind the caller expects, belongs to subject (for registrations) and
+// has not expired. The ceremony is consumed even when the checks fail, so
+// every Finish attempt needs a new Begin.
+func (p *Passkeys) consumeCeremony(ctx context.Context, id uuid.UUID, kind ceremonyKind, subject string) (*ceremonyRecord, error) {
 	now := p.s.now()
-	data, err := p.s.ceremonies.ConsumeCeremony(ctx, id, now)
+	data, err := p.s.ceremonies.ConsumeCeremony(ctx, storeKey(id, kind, subject), now)
 	if errors.Is(err, ErrCeremonyNotFound) {
 		return nil, ErrInvalidCeremony
 	}
@@ -77,7 +89,7 @@ func (p *Passkeys) consumeCeremony(ctx context.Context, id uuid.UUID, kind cerem
 	}
 	// The store is trusted to expire ceremonies, but the time is checked
 	// again so a store that ignores now cannot extend the window.
-	if rec.Kind != kind || !now.Before(rec.ExpiresAt) {
+	if rec.Kind != kind || !now.Before(rec.ExpiresAt) || (kind == kindRegistration && rec.Subject != subject) {
 		return nil, ErrInvalidCeremony
 	}
 	return &rec, nil

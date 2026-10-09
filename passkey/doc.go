@@ -13,8 +13,9 @@
 //   - Login ([Passkeys.BeginLogin], [Passkeys.FinishLogin]) verifies an
 //     assertion and issues an access and refresh token pair through the
 //     [github.com/tpyle/auth/v2.Authorizer], exactly as a password login does.
-//     [Passkeys.Authenticate] verifies without issuing tokens, for example to
-//     confirm a sensitive action.
+//     [Passkeys.Authenticate] verifies without issuing tokens, and
+//     [Passkeys.AuthenticateFor] re-authenticates a signed-in user, for
+//     example to confirm a sensitive action.
 //
 // The Begin methods return JSON options for the browser's
 // navigator.credentials.create or navigator.credentials.get (pass the
