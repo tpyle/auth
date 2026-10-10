@@ -8,6 +8,7 @@ updates:
     directories:
       - "/"
       - "/passkey"
+      - "/srp"
     schedule:
       interval: "weekly"
 

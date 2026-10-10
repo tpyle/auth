@@ -96,6 +96,36 @@ pair, err := pk.FinishLogin(ctx, ch.CeremonyID, response) // same TokenPair as L
 
 See [wiki/Passkeys.md](wiki/Passkeys.md) and [`passkey/examples/server`](passkey/examples/server).
 
+## SRP
+
+Password login with the Secure Remote Password protocol (SRP-6a), in which
+the password never reaches the server and the server proves to the client
+that it holds the user's verifier, lives in another separate module:
+
+```bash
+go get github.com/tpyle/auth/srp
+```
+
+```go
+server, err := srp.New(
+	srp.WithUserStore(verifiers), // stores Verifier.String() per user
+	srp.WithDecoyKey(decoyKey),   // hides which usernames exist
+	srp.WithTokenIssuer(a),       // the *auth.Authorizer above
+)
+ch, err := server.BeginLogin(ctx, username)  // send ch to the client
+res, err := server.FinishLogin(ctx, response) // res.Tokens, res.ServerProof
+```
+
+Verifiers use Argon2id rather than a single hash, so a stolen verifier is
+as costly to attack as a password hash.
+
+SRP is mainly useful for clients the server doesn't deliver, such as native
+apps and CLIs. In browsers the server supplies the code that handles the
+password, so SRP adds little over a password login over HTTPS and doesn't
+stop phishing; use passkeys for that. See [wiki/SRP.md](wiki/SRP.md),
+which also specifies the protocol for JavaScript clients, and
+[`srp/examples`](srp/examples).
+
 ## Examples
 
 - [`examples/basic`](examples/basic): the whole lifecycle in one program (`go run ./examples/basic`).
@@ -112,6 +142,7 @@ See [wiki/Passkeys.md](wiki/Passkeys.md) and [`passkey/examples/server`](passkey
 - [Error Handling](wiki/Error-Handling.md)
 - [Security](wiki/Security.md)
 - [Passkeys](wiki/Passkeys.md): FIDO2/WebAuthn login
+- [SRP](wiki/SRP.md): Secure Remote Password login
 
 API reference: [pkg.go.dev/github.com/tpyle/auth/v2](https://pkg.go.dev/github.com/tpyle/auth/v2)
 

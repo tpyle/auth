@@ -20,6 +20,7 @@ import "github.com/tpyle/auth/v2"
 - **JWKS endpoint** so other services can verify tokens with any standard JWT library.
 - **In-memory stores** for tests, examples and single-instance deployments.
 - **Passkeys (FIDO2/WebAuthn)** through the separate [`github.com/tpyle/auth/passkey`](Passkeys.md) module, which issues the same tokens as a password login.
+- **SRP (Secure Remote Password)** through the separate [`github.com/tpyle/auth/srp`](SRP.md) module: password login in which the password never reaches the server, and the server proves itself to the client. Mainly useful for native and command-line clients; see [When not to use it](SRP.md#when-not-to-use-it).
 - Dependencies: `golang-jwt/jwt/v5`, `google/uuid`, `golang.org/x/crypto`. No dependency on any configuration library.
 
 ## Pages
@@ -34,4 +35,5 @@ import "github.com/tpyle/auth/v2"
 | [Error Handling](Error-Handling.md) | Every sentinel error and how to map it to HTTP statuses |
 | [Security](Security.md) | Hashing parameters, cryptographic choices, deployment advice |
 | [Passkeys](Passkeys.md) | Passwordless login with passkeys and FIDO2 security keys (the `passkey` module) |
+| [SRP](SRP.md) | Password login without sending the password, with SRP-6a and Argon2id (the `srp` module) |
 | [Migrating from v1](Migrating-from-v1.md) | API mapping and behavior changes from v1 |
